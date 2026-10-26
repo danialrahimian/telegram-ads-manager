@@ -12,6 +12,7 @@ import type {
   Account,
   AdDetail,
   AdRow,
+  AdsPeriod,
   Analysis,
   AppSettings,
   BulkOperation,
@@ -114,16 +115,29 @@ export function useDashboard(slug: string, days = 60) {
   });
 }
 
-export function useAds(slug: string, since?: string, archived = false) {
+export interface AdsQuery {
+  since?: string;
+  archived?: boolean;
+  period?: string;
+  from?: string;
+  to?: string;
+}
+
+export function useAds(slug: string, opts: AdsQuery = {}) {
   const refetchInterval = useRefreshMs();
   const qs = new URLSearchParams();
-  if (since) qs.set("since", since);
-  if (archived) qs.set("archived", "true");
+  if (opts.since) qs.set("since", opts.since);
+  if (opts.archived) qs.set("archived", "true");
+  if (opts.period) qs.set("period", opts.period);
+  if (opts.period === "custom" && opts.from) qs.set("from", opts.from);
+  if (opts.period === "custom" && opts.to) qs.set("to", opts.to);
   const q = qs.toString();
   return useQuery({
-    queryKey: [...keys.acc(slug), "ads", since ?? "", archived],
+    queryKey: [...keys.acc(slug), "ads", q],
     queryFn: () =>
-      api.get<{ ads: AdRow[]; since: string | null; archived_count: number }>(`${A(slug)}/ads${q ? `?${q}` : ""}`),
+      api.get<{ ads: AdRow[]; since: string | null; archived_count: number; period: AdsPeriod }>(
+        `${A(slug)}/ads${q ? `?${q}` : ""}`,
+      ),
     refetchInterval: refetchInterval * 2,
     placeholderData: keepPreviousData,
   });

@@ -651,6 +651,7 @@ def item_public(it: BulkItem, ads: dict[int, Ad]) -> dict[str, Any]:
         "withdrawn": it.withdrawn,
         "text": it.params.get("text"),
         "promote_url": it.params.get("promote_url"),
+        "wave": it.params.get("wave"),
         "old_status": old.status if old else None,
         "new_status": new.status if new else None,
         "updated_ts": it.updated_ts,
