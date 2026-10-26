@@ -292,7 +292,7 @@ def test_ads_table_filters(page, shot):
     _nav(page, "/accounts/psychonet/ads")
     expect(page.get_by_role("heading", name="Ads")).to_be_visible()
     total = page.locator("tbody tr").count()
-    page.get_by_role("button", name="Status").click()
+    page.get_by_label("Status", exact=True).click()  # the filter menu, not the sortable column header
     page.get_by_role("menuitemcheckbox", name="Active").click()
     page.keyboard.press("Escape")
     page.get_by_role("combobox", name="Period").click()
