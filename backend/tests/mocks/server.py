@@ -4,6 +4,8 @@
 
 Extra endpoints for tests:
   bot server  POST /__test/add_user {"key": "a", "referrer": "9001"}
+              POST /__test/start {"key": "a", "code": "9934521877"}   (a new account starts the bot with it)
+              POST /__test/stores_unknown {"value": true}           (record users of unknown start codes)
   Telegram    POST /__test/review {"key": "a", "ad_id": null, "decision": "approve"|"decline", "reason": ""}
               POST /__test/set_ad {"key": "a", "ad_id": 11, "fields": {"remaining_budget": 1.0}}
               POST /__test/set_balance {"key": "a", "amount": 5}
@@ -88,6 +90,14 @@ def make_bot_handler(mock: BotMock) -> type[BaseHTTPRequestHandler]:
         def _handle(self, method: str) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            if self.path == "/__test/start":
+                uid = mock.start(body.get("key", "a"), str(body.get("code", "")))
+                self._send(200, {"ok": True, "user_id": uid})
+                return
+            if self.path == "/__test/stores_unknown":
+                mock.stores_unknown_start = bool(body.get("value", True))
+                self._send(200, {"ok": True})
+                return
             if self.path == "/__test/add_user":
                 uid = mock.add_user(
                     body.get("key", "a"), str(body.get("referrer", "9001")), bool(body.get("buy", True))

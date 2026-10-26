@@ -281,13 +281,12 @@ def test_referrer_assignment_groups_when_short():
     assert assign(rows, [])[0] == []
 
 
-def test_campaign_code_and_capability_probe_classification():
-    import re as _re
-
+def test_random_code_and_capability_probe_classification():
     from app.integrations.telegram_ads import TelegramAdsError, classify_probe
-    from app.services.tracking import CAMPAIGN, campaign_code
+    from app.services.tracking import CODE_MIN, random_code
 
-    assert _re.fullmatch(r"c_[a-z0-9]{6}", campaign_code()) and CAMPAIGN.available is False
+    codes = {random_code() for _ in range(200)}
+    assert all(c.isdigit() and len(c) == 10 and int(c) >= CODE_MIN for c in codes) and len(codes) > 190
     assert classify_probe(TelegramAdsError("deleteAd", "METHOD_NOT_FOUND")) == "no"
     assert classify_probe(TelegramAdsError("deleteAd", "HTTP 404", 404)) == "no"
     assert classify_probe(TelegramAdsError("deleteAd", "AD_ID_REQUIRED")) == "yes"

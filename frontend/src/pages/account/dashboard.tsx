@@ -24,9 +24,14 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { dayLabel, delta, money, num, pct, time, toman } from "@/lib/format";
 import { useAds, useDashboard, useLive } from "@/lib/queries";
 
+function tzLabel(tz: string | undefined): string {
+  if (!tz || tz === "Asia/Tehran") return "تهران";
+  return tz;
+}
+
 export default function DashboardPage() {
   const account = useAccountCtx();
-  const [win, setWin] = useState<"7" | "28">("7");
+  const [win, setWin] = useState<"today" | "7" | "28">("7");
   const [range, setRange] = useState(30);
   const dash = useDashboard(account.slug, Math.max(range, 30));
   const live = useLive(account.slug);
@@ -45,8 +50,10 @@ export default function DashboardPage() {
   if (dash.error) return <QueryError error={dash.error} retry={() => dash.refetch()} />;
 
   const target = account.settings.target_cost_per_customer;
-  const cpp = s?.attributed_28.cpp ?? null;
+  const cpp = (win === "today" ? s?.attributed_today?.cpp : s?.attributed_28.cpp) ?? null;
   const today = live.data?.live.today;
+  const tzName = tzLabel(account.settings.bot_timezone);
+  const vsLabel = win === "today" ? "نسبت به دیروز تا همین ساعت" : "نسبت به دوره‌ی قبل";
 
   return (
     <div className="space-y-5">
@@ -60,7 +67,7 @@ export default function DashboardPage() {
             </span>
             امروز، زنده
           </CardTitle>
-          <CardDescription>از ابتدای امروز (UTC) — هر چند ثانیه به‌روز می‌شود</CardDescription>
+          <CardDescription>از ۰۰:۰۰ به وقت {tzName} — هر چند ثانیه به‌روز می‌شود</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-2">
@@ -91,8 +98,9 @@ export default function DashboardPage() {
       {/* KPI cards */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="font-semibold">خلاصه‌ی عملکرد</h2>
-        <Tabs value={win} onValueChange={(v) => setWin(v as "7" | "28")}>
+        <Tabs value={win} onValueChange={(v) => setWin(v as "today" | "7" | "28")}>
           <TabsList>
+            <TabsTrigger value="today">امروز</TabsTrigger>
             <TabsTrigger value="7">۷ روز</TabsTrigger>
             <TabsTrigger value="28">۲۸ روز</TabsTrigger>
           </TabsList>
@@ -106,7 +114,7 @@ export default function DashboardPage() {
           value={money(w?.spent, cur)}
           change={w ? delta(w.spent, w.prev_spent) : null}
           goodWhen="neutral"
-          hint="نسبت به دوره‌ی قبل"
+          hint={win === "today" ? `از ۰۰:۰۰ به وقت ${tzName} · ${vsLabel}` : vsLabel}
         />
         <StatCard
           label="استارت ربات"
@@ -162,7 +170,7 @@ export default function DashboardPage() {
           loading={!s}
           value={money(cpp, cur)}
           tone={cpp == null ? undefined : cpp <= target ? "good" : "bad"}
-          hint={`هدف: ${money(target, cur)} · ۲۸ روز`}
+          hint={`هدف: ${money(target, cur)} · ${win === "today" ? "امروز" : "۲۸ روز"}`}
         />
       </div>
 

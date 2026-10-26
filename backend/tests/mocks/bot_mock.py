@@ -23,6 +23,8 @@ KEYS = {
 # "botkey-echo": like botkey-500, but the error page repeats the Token header (the key must never leak).
 # "botkey-otherbot": the key of bot B used in account A (setting_info reports another username).
 BOT_NAMES = {"a": "psychonet_test_bot", "b": "darvaze_test_bot"}
+# Referrer accounts the advertiser owns but which have not invited anyone yet (used for the referrer pool).
+OWN_ACCOUNTS = {"a": ["9500", "9600", "9700"], "b": ["9800"]}
 # "botkey-crash" reproduces what the real (subscription) bot did: the unfiltered ledger fails with an
 # HTTP 500 and a non-JSON body, while the documented per-type query is assumed to work; referrals as obj.users.
 RAW = "__raw__"
@@ -31,7 +33,10 @@ REFERRERS = {"a": {"9001": 40, "9002": 12}, "b": {"9101": 25}}
 
 
 class BotMock:
-    def __init__(self, seed: int = 11) -> None:
+    def __init__(self, seed: int = 11, *, stores_unknown_start: bool = False) -> None:
+        # Whether a user who starts the bot with an unknown numeric code is recorded under that code (and
+        # listed by affiliates_users for it). The real bot's behaviour is what the panel's test finds out.
+        self.stores_unknown_start = stores_unknown_start
         self.lock = threading.Lock()
         self.calls: list[tuple[str, str, str]] = []
         rnd = random.Random(seed)
@@ -57,6 +62,7 @@ class BotMock:
                 typ = rnd.choice(["buy", "buy", "buy_extend", "charge_gateway", "cashback"])
                 txs.append(self._tx(len(txs) + 1, uid, typ, rnd.choice([59000, 89000, 119000]), when))
             self.data[key] = {
+                "known": set(OWN_ACCOUNTS[key]),
                 "users": users,
                 "txs": sorted(txs, key=lambda t: t["created_at"], reverse=True),
                 "count_user": 1500 if key == "a" else 600,
@@ -86,6 +92,24 @@ class BotMock:
             if buy:
                 d["txs"].insert(0, self._tx(len(d["txs"]) + 1000, uid, "buy", 59000, now))
             return uid
+
+    def start(self, key: str, code: str) -> int:
+        """A brand-new Telegram account opens t.me/<bot>?start=<code>. Returns the new user's id."""
+        with self.lock:
+            d = self.data[key]
+            uid = 970000 + d["count_user"]
+            row = {"id": uid, "username": f"u{uid}", "register": int(datetime.now().timestamp())}
+            d["count_user"] += 1
+            if self._exists(d, code) or self.stores_unknown_start:  # a real referrer: a referral of that user
+                d["users"].setdefault(code, []).append(row)
+            d["known"].add(str(uid))
+            return uid
+
+    @staticmethod
+    def _exists(d: dict[str, Any], cid: str) -> bool:
+        if cid in d["known"] or cid in d["users"]:
+            return True
+        return any(str(u["id"]) == cid for rows in d["users"].values() for u in rows)
 
     def handle(self, token: str, method: str, path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         key = KEYS.get(token)
@@ -147,7 +171,7 @@ class BotMock:
                 return 200, {"status": True, "msg": "Successful", "obj": rows[(page - 1) * limit : page * limit]}
             if action == "user":
                 cid = str(body.get("chat_id"))
-                if cid in d["users"] or cid.isdigit():
+                if self._exists(d, cid):
                     return 200, {
                         "status": True,
                         "msg": "Successful",

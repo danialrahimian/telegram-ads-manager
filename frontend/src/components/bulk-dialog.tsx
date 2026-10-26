@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangleIcon, ArrowLeftIcon, ImageIcon, InfoIcon, ShieldCheckIcon, TagIcon } from "lucide-react";
+import { CopyButton } from "@/components/copy-button";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -21,9 +22,9 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, errorMessage } from "@/lib/api";
-import { BULK_KIND_LABEL } from "@/lib/bulk";
-import { money, num } from "@/lib/format";
-import { accountApi, keys, useAction, useCapabilities, useTexts } from "@/lib/queries";
+import { BULK_KIND_LABEL, supportsPhoto } from "@/lib/bulk";
+import { faDigits, money, num } from "@/lib/format";
+import { accountApi, keys, useAction, useCapabilities, useTexts, useTracking } from "@/lib/queries";
 import type { Account, BulkKind, BulkMode, BulkOperation, BulkPreview, BulkRequest, Capabilities } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -33,7 +34,11 @@ export interface BulkTarget {
   text: string;
   reason?: string;
   promote_url?: string;
+  placement?: string;
+  target_type?: string;
 }
+
+type ReferralMode = "pool" | "shared" | "random";
 
 const CAP_TEXT: Record<string, string> = {
   yes: "API عوض کردن عکس آگهی موجود را پشتیبانی می‌کند؛ هر دو حالت ممکن است.",
@@ -72,7 +77,12 @@ export function BulkDialog({
   const [photo, setPhoto] = useState<{ id: string; name: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [budgetSource, setBudgetSource] = useState<"account" | "transfer">("transfer");
-  const [initialBudget, setInitialBudget] = useState(String(st.default_budget));
+  const minBudget = st.min_initial_budget ?? 1;
+  const [initialBudget, setInitialBudget] = useState(String(Math.max(st.default_budget, minBudget)));
+  const [refMode, setRefMode] = useState<ReferralMode>("pool");
+  const [sharedRef, setSharedRef] = useState("");
+  const [sharedTag, setSharedTag] = useState("none");
+  const tracking = useTracking(account.slug);
   const [topupAfter, setTopupAfter] = useState(false);
   const [groupBy, setGroupBy] = useState<"target" | "cpm" | "placement">("target");
   const [preview, setPreview] = useState<BulkPreview | null>(null);
@@ -91,6 +101,11 @@ export function BulkDialog({
     ...(budgetSource === "account" ? { initial_budget: Number(initialBudget) } : {}),
     topup_after_withdraw: budgetSource === "account" && topupAfter,
     group_by: groupBy,
+    ...(kind === "referral" ? { referral_mode: refMode } : {}),
+    ...(kind === "referral" && refMode === "shared" && sharedTag !== "none" ? { shared_tag_id: Number(sharedTag) } : {}),
+    ...(kind === "referral" && refMode === "shared" && sharedTag === "none" && sharedRef.trim()
+      ? { shared_referrer_id: sharedRef.trim() }
+      : {}),
     ...(proposalIds?.length ? { proposal_ids: proposalIds } : {}),
   });
 
@@ -140,9 +155,16 @@ export function BulkDialog({
 
   const editCap = caps.data?.edit_photo ?? "unknown";
   const deleteCap = caps.data?.delete_ad ?? "unknown";
+  const photoAds = targets.filter(supportsPhoto).length;
+  const budgetTooLow = effMode === "replace" && budgetSource === "account" && Number(initialBudget) < minBudget;
   const canConfig =
-    kind === "referral" ||
-    (perAd ? Object.values(perAdTexts).every((v) => v.trim()) : !!(text.trim() || variantId !== "none" || photo));
+    !budgetTooLow &&
+    (kind === "referral"
+      ? refMode !== "shared" || sharedTag !== "none" || /^\d{3,20}$/.test(sharedRef.trim())
+      : perAd
+        ? Object.values(perAdTexts).every((v) => v.trim())
+        : !!(text.trim() || variantId !== "none" || photo));
+  const randomResult = tracking.data?.random.result ?? account.settings.random_tracking ?? "unknown";
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -188,29 +210,115 @@ export function BulkDialog({
 
             {kind === "referral" && (
               <>
-                <Alert variant="info">
-                  <TagIcon />
-                  <AlertTitle>لینک رفرال از استخر معرف‌ها</AlertTitle>
-                  <AlertDescription>
-                    <p>
-                      به هر آگهی یک معرف آزاد از استخر (تنظیمات حساب) می‌رسد و لینکش <span className="ltr">?start=شناسه‌ی معرف</span> می‌شود؛ ربات فقط
-                      شناسه‌ی عددی یک کاربر موجود را به‌عنوان منبع می‌شناسد. اگر معرف کمتر از آگهی باشد، آگهی‌ها گروه‌بندی می‌شوند و فروش هر
-                      گروه فقط برای کل گروه دیده می‌شود.
-                    </p>
-                  </AlertDescription>
-                </Alert>
-                <Field label="گروه‌بندی وقتی معرف کم است">
-                  <Select value={groupBy} onValueChange={(v) => setGroupBy(v as typeof groupBy)}>
-                    <SelectTrigger className="w-full" aria-label="گروه‌بندی">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="target">بر اساس کانال/ربات</SelectItem>
-                      <SelectItem value="cpm">بر اساس CPM</SelectItem>
-                      <SelectItem value="placement">بر اساس نوع جایگاه</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <Field label="نوع لینک رفرال">
+                  <div className="grid gap-2" role="radiogroup" aria-label="نوع لینک رفرال">
+                    {(
+                      [
+                        ["pool", "از استخر معرف‌ها", "به هر آگهی (یا گروه آگهی) یک معرف آزاد از استخر (تنظیمات حساب) می‌رسد."],
+                        ["shared", "یک لینک مشترک برای همه", "همه‌ی آگهی‌های انتخاب‌شده لینک یک معرف یا برچسب را می‌گیرند، حتی اگر از قبل روی آگهی‌های دیگر باشد."],
+                        ["random", "لینک رندوم اختصاصی برای هر آگهی", "برای هر آگهی یک کد عددی تصادفی و یکتا ساخته می‌شود، با برچسب خودش."],
+                      ] as const
+                    ).map(([k, label, desc]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        role="radio"
+                        aria-checked={refMode === k}
+                        onClick={() => setRefMode(k)}
+                        className={cn("rounded-lg border p-3 text-start text-sm transition hover:bg-muted/60", refMode === k && "border-primary bg-accent/60")}
+                      >
+                        <div className="font-medium">{label}</div>
+                        <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{desc}</div>
+                      </button>
+                    ))}
+                  </div>
                 </Field>
+                {refMode === "pool" && (
+                  <>
+                    <Alert variant="info">
+                      <TagIcon />
+                      <AlertDescription>
+                        <p>
+                          لینک هر آگهی <span className="ltr">?start=شناسه‌ی معرف</span> می‌شود. اگر معرف کمتر از آگهی باشد، آگهی‌ها گروه‌بندی
+                          می‌شوند و فروش هر گروه فقط برای کل گروه دیده می‌شود.
+                        </p>
+                      </AlertDescription>
+                    </Alert>
+                    <Field label="گروه‌بندی وقتی معرف کم است">
+                      <Select value={groupBy} onValueChange={(v) => setGroupBy(v as typeof groupBy)}>
+                        <SelectTrigger className="w-full" aria-label="گروه‌بندی">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="target">بر اساس کانال/ربات</SelectItem>
+                          <SelectItem value="cpm">بر اساس CPM</SelectItem>
+                          <SelectItem value="placement">بر اساس نوع جایگاه</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  </>
+                )}
+                {refMode === "shared" && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="برچسب موجود">
+                      <Select value={sharedTag} onValueChange={setSharedTag}>
+                        <SelectTrigger className="w-full" aria-label="برچسب موجود">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">— شناسه‌ی معرف را بنویسید —</SelectItem>
+                          {tracking.data?.tags.map((t) => (
+                            <SelectItem key={t.id} value={String(t.id)}>
+                              {t.name} ({t.start_code})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label="یا شناسه‌ی معرف (از استخر یا دستی)" htmlFor="shared-ref">
+                      <Input
+                        id="shared-ref"
+                        dir="ltr"
+                        inputMode="numeric"
+                        list="pool-ids"
+                        disabled={sharedTag !== "none"}
+                        value={sharedRef}
+                        onChange={(e) => setSharedRef(e.target.value.replace(/\D/g, ""))}
+                      />
+                      <datalist id="pool-ids">
+                        {tracking.data?.pool.map((p) => (
+                          <option key={p.referrer_id} value={p.referrer_id} />
+                        ))}
+                      </datalist>
+                    </Field>
+                    <p className="text-xs text-muted-foreground sm:col-span-2">فروش فقط برای کل این گروه دیده می‌شود، نه برای هر آگهی.</p>
+                  </div>
+                )}
+                {refMode === "random" && (
+                  <Alert variant={randomResult === "works" ? "success" : "warning"}>
+                    <AlertTriangleIcon />
+                    <AlertTitle>
+                      {randomResult === "works"
+                        ? "آزمایش نشان داد ربات کاربران کد رندوم را ثبت می‌کند؛ فروش هر آگهی جدا دیده می‌شود."
+                        : randomResult === "ignored"
+                          ? "آزمایش نشان داد ربات کاربرانی را که با کد ناشناخته می‌آیند ثبت نمی‌کند."
+                          : "هنوز معلوم نیست ربات کاربرانی را که با کد ناشناخته می‌آیند ثبت می‌کند."}
+                    </AlertTitle>
+                    {randomResult !== "works" && (
+                      <AlertDescription>
+                        <p>
+                          ربات فعلاً فقط وقتی کاربر را به یک منبع نسبت می‌دهد که start شناسه‌ی یک کاربر موجود باشد. لینک‌ها کار می‌کنند، ولی
+                          ممکن است فروش این آگهی‌ها در پنل جدا دیده نشود. پیشنهاد: اول «آزمایش ردیابی کد رندوم» را در تنظیمات حساب انجام دهید.
+                        </p>
+                        {tracking.data?.campaign_request && (
+                          <span className="flex items-center gap-1 text-xs">
+                            متن درخواست برای توسعه‌دهنده‌ی ربات <CopyButton value={tracking.data.campaign_request} label="کپی متن درخواست" />
+                          </span>
+                        )}
+                      </AlertDescription>
+                    )}
+                  </Alert>
+                )}
               </>
             )}
 
@@ -301,7 +409,13 @@ export function BulkDialog({
                 <Field
                   label="عکس تازه (اختیاری، JPG/PNG کمتر از ۵ مگابایت)"
                   htmlFor="bulk-photo"
-                  hint={CAP_TEXT[editCap]}
+                  hint={
+                    <>
+                      {photoAds < targets.length &&
+                        `عکس فقط روی ${num(photoAds)} آگهی کانال اعمال می‌شود؛ ${num(targets.length - photoAds)} آگهی ربات عکس ندارند. `}
+                      {CAP_TEXT[editCap]}
+                    </>
+                  }
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <Input
@@ -327,7 +441,7 @@ export function BulkDialog({
                 <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="منبع بودجه">
                   {(
                     [
-                      ["transfer", "انتقال از آگهی قدیمی", `با ${money(st.bulk_min_budget, cur)} ساخته می‌شود؛ بعد از توقف و برداشت از قدیمی، همان مبلغ (تا سقف هر شارژ) شارژ می‌شود.`],
+                      ["transfer", "انتقال از آگهی قدیمی", `با حداقل بودجه‌ی تلگرام (${money(minBudget, cur)}) از موجودی ساخته می‌شود؛ بعد از تأیید و برداشت از قدیمی، فقط مازاد بودجه‌ی قدیمی بر این حداقل به آگهی جدید شارژ می‌شود.`],
                       ["account", "از موجودی حساب", "بودجه‌ی اولیه از موجودی حساب کم می‌شود؛ بودجه‌ی قدیمی به موجودی برمی‌گردد."],
                     ] as const
                   ).map(([k, label, desc]) => (
@@ -351,12 +465,16 @@ export function BulkDialog({
             )}
             {effMode === "replace" && budgetSource === "account" && (
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label={`بودجه‌ی اولیه‌ی هر آگهی (${cur || "ارز حساب"})`} htmlFor="bulk-budget">
+                <Field
+                  label={`بودجه‌ی اولیه‌ی هر آگهی (${cur || "ارز حساب"})`}
+                  htmlFor="bulk-budget"
+                  error={budgetTooLow ? `حداقل ${money(minBudget, cur)}؛ تلگرام آگهی با بودجه‌ی کمتر نمی‌سازد.` : undefined}
+                >
                   <Input
                     id="bulk-budget"
                     type="number"
                     dir="ltr"
-                    min={0}
+                    min={minBudget}
                     step={0.1}
                     value={initialBudget}
                     onChange={(e) => setInitialBudget(e.target.value)}
@@ -422,7 +540,7 @@ function PreviewView({ p, currency }: { p: BulkPreview; currency: string }) {
     <div className="grid min-w-0 gap-3" data-testid="bulk-preview">
       <div className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-4">
         <Mini label="آگهی قابل اجرا" value={num(p.totals.ads)} />
-        <Mini label="کنار گذاشته" value={num(p.totals.blocked)} />
+        <Mini label="بدون تغییر / کنار گذاشته" value={num(p.totals.skipped + p.totals.blocked)} />
         {p.mode === "replace" ? (
           <>
             <Mini label="از موجودی حساب" value={money(p.totals.from_account, currency)} />
@@ -435,6 +553,17 @@ function PreviewView({ p, currency }: { p: BulkPreview; currency: string }) {
           </>
         )}
       </div>
+      {p.photo_summary && (
+        <p className="rounded-md bg-muted/50 px-3 py-2 text-sm" data-testid="photo-summary">
+          {faDigits(p.photo_summary)}
+        </p>
+      )}
+      {p.budget_line && (
+        <p className="rounded-md bg-muted/50 px-3 py-2 text-sm" data-testid="budget-line">
+          {faDigits(p.budget_line)}
+          {p.totals.first_wave < p.totals.ads && ` موج اول: ${num(p.totals.first_wave)} آگهی.`}
+        </p>
+      )}
       {p.mode === "replace" && (
         <p className="text-xs text-muted-foreground">
           موجودی حساب: <span className="num">{money(p.totals.account_balance, currency)}</span> · بودجه‌ی فعلی آگهی‌های قدیمی:{" "}
@@ -479,13 +608,19 @@ function PreviewView({ p, currency }: { p: BulkPreview; currency: string }) {
       )}
       <div className="grid max-h-80 gap-2 overflow-y-auto pe-1">
         {p.items.map((it) => (
-          <div key={it.ad_id} className={cn("min-w-0 space-y-1.5 rounded-lg border p-3 text-xs", it.blocked && "border-dashed opacity-80")}>
+          <div
+            key={it.ad_id}
+            className={cn("min-w-0 space-y-1.5 rounded-lg border p-3 text-xs", (it.blocked || it.skipped) && "border-dashed opacity-80")}
+          >
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">{it.label}</span>
               <span className="num text-xs text-muted-foreground">#{it.ad_id}</span>
               {it.blocked && <Badge variant="secondary">اجرا نمی‌شود</Badge>}
+              {it.skipped && <Badge variant="outline">بدون تغییر</Badge>}
             </div>
-            {it.blocked ? (
+            {it.skipped ? (
+              <p className="text-muted-foreground">{it.skipped}</p>
+            ) : it.blocked ? (
               <p className="text-destructive">{it.blocked}</p>
             ) : (
               <>

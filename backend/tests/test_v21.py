@@ -46,11 +46,11 @@ async def _drain(rounds: int = 25) -> None:
                     return
 
 
-async def _setup(api, tg_mock, **settings) -> None:
+async def _setup(api, tg_mock, balance: float = 10, **settings) -> None:
+    tg_mock.set_balance("a", balance)
     await make_account(api)
     await api.patch(A, json={"settings": {"bulk_batch_interval_seconds": 0, **settings}})
     await _sync_all()
-    tg_mock.set_balance("a", 10)
 
 
 async def _items(op_id: int) -> list[BulkItem]:
@@ -173,7 +173,7 @@ async def test_bulk_text_replace_flow_archives_old_ads(api, tg_mock):
     assert not p["errors"] and p["retire"] == "archive" and p["totals"]["ads"] == 2
     it = p["items"][0]
     assert any(c["field"] == "text" and c["new"] == new_text for c in it["changes"])
-    assert it["money"]["from_account"] == 0.1 and it["money"]["from_old"] > 0
+    assert it["money"]["from_account"] == 1.0 and it["money"]["from_old"] > 0  # Telegram's minimum, 1 TON
     assert any("بررسی تلگرام" in w for w in it["warnings"]) and any("بایگانی" in w for w in it["warnings"])
     assert (await api.post(f"{A}/bulk", json=body)).status_code == 400  # no explicit confirmation
 
@@ -187,7 +187,7 @@ async def test_bulk_text_replace_flow_archives_old_ads(api, tg_mock):
         old = tg_mock.accounts["a"]["ads"][i.ad_id]
         assert not old.get("is_paused") and old["remaining_budget"] > 0
         new = tg_mock.accounts["a"]["ads"][i.new_ad_id]
-        assert new["text"] == new_text and new["cpm"] == old["cpm"] and new["remaining_budget"] == 0.1
+        assert new["text"] == new_text and new["cpm"] == old["cpm"] and new["remaining_budget"] == 1.0
 
     tg_mock.review("a", decision="approve")
     await sync.run(await _id(), "fast")
@@ -198,7 +198,7 @@ async def test_bulk_text_replace_flow_archives_old_ads(api, tg_mock):
         old = tg_mock.accounts["a"]["ads"][i.ad_id]
         assert old["is_paused"] and old["remaining_budget"] == 0
         new = tg_mock.accounts["a"]["ads"][i.new_ad_id]
-        assert new["remaining_budget"] > 0.1  # the old budget was moved (up to the per-top-up cap)
+        assert new["remaining_budget"] > 1.0  # the excess of the old budget was moved (up to one top-up)
         assert i.withdrawn > 0
     ads = {a["ad_id"]: a for a in (await api.get(f"{A}/ads")).json()["ads"]}
     assert 3 not in ads and 8 not in ads  # archived ads are hidden by default
@@ -334,9 +334,10 @@ async def test_bulk_referral_links_from_the_pool(api, tg_mock, bot_mock):
     by_id = {p["referrer_id"]: p for p in tr}
     assert by_id["9001"]["check"]["invited"] == 40 and by_id["9500"]["free"]
     info = (await api.get(f"{A}/tracking")).json()
-    assert info["mode"] == "pool" and not next(m for m in info["modes"] if m["key"] == "campaign")["available"]
-    assert info["campaign_example"].startswith("c_") and "start_code" in info["campaign_request"]
-    assert (await api.patch(A, json={"settings": {"tracking_mode": "campaign"}})).status_code == 400
+    assert [m["key"] for m in info["modes"]] == ["pool", "shared", "random"]
+    assert len(info["random_example"]) == 10 and "start_code" in info["campaign_request"]
+    assert info["random"]["result"] == "unknown"
+    assert (await api.patch(A, json={"settings": {"random_tracking": "works"}})).status_code == 400
     sales = (await api.get(f"{A}/sales")).json()["overview"]
     untagged_before = sales["untagged_ads"]
     assert untagged_before > 0

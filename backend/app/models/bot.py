@@ -19,6 +19,8 @@ class ReferralTag(Base):
     name: Mapped[str] = mapped_column(String(80))
     referrer_id: Mapped[str] = mapped_column(String(32))  # Telegram numeric id of the referrer account
     start_code: Mapped[str] = mapped_column(String(128))  # value after ?start= in the invite link
+    # "referrer": a real referrer account in the bot; "random": a random numeric code made for one ad
+    kind: Mapped[str] = mapped_column(String(16), default="referrer")
     note: Mapped[str] = mapped_column(Text, default="")
     referred_count: Mapped[int] = mapped_column(Integer, default=0)
     last_synced_ts: Mapped[int] = mapped_column(Integer, default=0)

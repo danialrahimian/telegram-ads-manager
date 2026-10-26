@@ -1,7 +1,8 @@
 """Bulk operations: one confirmed change applied to many ads, step by step through the job queue.
 
-Kinds: "content" (new text and/or photo), "referral" (a referral link per ad from the referrer pool)
-and "replace" (a compliant replacement for ads Telegram declined or stopped showing).
+Kinds: "content" (new text and/or photo; the photo only reaches ads whose placement shows one),
+"referral" (referral links: from the referrer pool, one shared link, or a random code per ad) and
+"replace" (a compliant replacement for ads Telegram declined or stopped showing).
 
 Two modes:
   inplace   editAd on the same ad: statistics stay, the ad is hidden again until Telegram re-approves.
@@ -13,6 +14,13 @@ Two modes:
 Every Telegram call is a Job with an idempotency key. Ads are submitted in batches (size, interval and
 how many may wait in review are account settings) so the rate limit is respected and not every ad goes
 to review at once. `advance()` runs after each fast sync and after bulk jobs finish.
+
+Money in replace mode: a new ad needs at least `min_initial_budget` (Telegram's minimum, 1 TON) from the
+account balance when it is created; the old ad's budget can only come back after the new one is approved
+and the old one has been paused for 10 minutes. With too little balance for every new ad, replacements
+go out in waves: as many as the balance pays for, the next wave once withdrawals of the previous wave are
+back. Only the excess of the old budget over the minimum is moved to the new ad ("transfer" jobs, which
+add no money and do not count against the top-up cap); initial budgets have their own daily cap.
 
 Item status: pending → submitted → in_review → approved → (replace: retired) | declined | failed | skipped.
 """
@@ -30,7 +38,18 @@ from app.db.base import now_ts
 from app.db.session import session_scope
 from app.integrations.telegram_ads import TelegramAdsError
 from app.models import Account, Ad, BulkItem, BulkOperation, Job, Proposal, TextVariant
-from app.services import accounts, actions, app_settings, budget, events, guidelines, metrics, referrals
+from app.services import (
+    accounts,
+    actions,
+    app_settings,
+    budget,
+    events,
+    guidelines,
+    metrics,
+    placement,
+    referrals,
+    tracking,
+)
 from app.services.accounts import settings_of
 from app.services.sync import start_code_of, target_summary
 
@@ -117,6 +136,19 @@ def create_target(ad: Ad) -> tuple[dict[str, Any], str] | None:
     return None
 
 
+def transfer_amount(old: float, source: str, move_old: bool, min_budget: float, cap: float) -> float:
+    """What goes from the withdrawn old budget to the new ad.
+
+    "transfer": the new ad started with the minimum from the balance, so only the excess of the old budget
+    over that minimum moves (the minimum stays in the balance for the next wave). "account" with
+    topup_after_withdraw: the whole old budget. Never more than one top-up (topup_max_per_ad).
+    """
+    if not move_old or old <= budget.EMPTY:
+        return 0.0
+    amount = max(0.0, old - min_budget) if source == "transfer" else old
+    return round(min(amount, cap), 5)
+
+
 def _blocking(check: dict[str, Any]) -> list[str]:
     return [i["message"] for i in check["issues"] if i["severity"] == "error"]
 
@@ -188,37 +220,82 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
                     "پشتیبانی عوض کردن عکس در جا هنوز آزمایش نشده؛ یا حالت «جایگزینی» را انتخاب کنید یا اول روی یک آگهی آزمایش کنید."
                 )
 
-    # Referral links from the pool.
+    # Referral links: from the pool, one shared link, or a random code per ad (made at creation).
     assignments: list[dict[str, Any]] = []
     url_for: dict[int, tuple[str, str | None]] = {}  # ad_id -> (promote_url, referrer_id)
+    ref_mode = body.get("referral_mode") or "pool"
+    random_tracking = st["random_tracking"]
     if kind == "referral":
         if not acc.bot_username:
             errors.append("نام کاربری ربات در تنظیمات حساب وارد نشده است.")
-        pool = await referrals.pool_status(s, acc)
-        targets = [rows[i] for i in ad_ids if i in rows and not rows[i]["tag_id"]]
-        assignments, w = referrals.assign(targets, pool, body.get("group_by") or "target")
-        warnings.extend(w)
-        if not assignments and targets:
-            errors.append("معرف آزادی برای ساخت برچسب نیست.")
-        for a in assignments:
-            for aid in a["ad_ids"]:
-                url_for[aid] = (f"https://t.me/{acc.bot_username}?start={a['referrer_id']}", a["referrer_id"])
+        base_url = f"https://t.me/{acc.bot_username}"
+        if ref_mode == "pool":
+            pool = await referrals.pool_status(s, acc)
+            targets = [rows[i] for i in ad_ids if i in rows and not rows[i]["tag_id"]]
+            assignments, w = referrals.assign(targets, pool, body.get("group_by") or "target")
+            warnings.extend(w)
+            if not assignments and targets:
+                errors.append("معرف آزادی برای ساخت برچسب نیست.")
+            for a in assignments:
+                for aid in a["ad_ids"]:
+                    url_for[aid] = (f"{base_url}?start={a['referrer_id']}", a["referrer_id"])
+        elif ref_mode == "shared":
+            shared = await referrals.resolve_shared(
+                s, acc, body.get("shared_referrer_id"), body.get("shared_tag_id"), check=live_balance
+            )
+            if shared.get("error"):
+                errors.append(shared["error"])
+            else:
+                assignments = [
+                    {
+                        "referrer_id": shared["referrer_id"],
+                        "tag_id": shared["tag_id"],
+                        "label": shared["label"],
+                        "ad_ids": [i for i in ad_ids if i in rows],
+                    }
+                ]
+                for aid in assignments[0]["ad_ids"]:
+                    url_for[aid] = (f"{base_url}?start={shared['start_code']}", shared["referrer_id"])
+                warnings.append(
+                    "همه‌ی این آگهی‌ها یک لینک می‌گیرند: فروش فقط برای کل این گروه دیده می‌شود، نه برای هر آگهی."
+                )
+                if shared.get("warning"):
+                    warnings.append(shared["warning"])
+        elif ref_mode == "random":
+            if not (acc.bot_base_url and acc.bot_api_key_enc):
+                errors.append("برای ساخت کد رندوم، اتصال API ربات لازم است (کدها با ربات چک می‌شوند).")
+            for aid in ad_ids:
+                url_for[aid] = (f"{base_url}?start=<کد ۱۰ رقمی تصادفی>", None)
+            if random_tracking != "works":
+                warnings.append(
+                    "⚠ هنوز معلوم نیست ربات کاربرانی را که با کد ناشناخته می‌آیند ثبت می‌کند"
+                    + (" (آزمایش نشان داد ثبت نمی‌کند)" if random_tracking == "ignored" else "")
+                    + ". لینک‌ها کار می‌کنند ولی ممکن است فروش این آگهی‌ها در پنل جدا دیده نشود. "
+                    "پیشنهاد: اول «آزمایش ردیابی کد رندوم» را در تنظیمات حساب انجام دهید، یا از توسعه‌دهنده‌ی ربات "
+                    "بخواهید کد start هر کاربر را ذخیره کند."
+                )
+        else:
+            raise AppError("نوع لینک رفرال نامعتبر است.")
 
     budget_source = body.get("budget_source") or "transfer"
     if budget_source not in ("account", "transfer"):
         raise AppError("منبع بودجه نامعتبر است.")
+    min_budget = float(st["min_initial_budget"])
     try:
-        initial = float(body.get("initial_budget") or st["default_budget"])
+        initial = float(body.get("initial_budget") or max(st["default_budget"], min_budget))
     except (TypeError, ValueError):
         raise AppError("بودجه‌ی اولیه باید عدد باشد.") from None
-    min_budget = float(st["bulk_min_budget"])
     move_old = budget_source == "transfer" or bool(body.get("topup_after_withdraw"))
     retire = "delete" if caps["delete_ad"] == "yes" else "archive"
-    if mode == "replace" and budget_source == "account" and not 0 < initial <= st["topup_max_per_ad"] * 5:
-        errors.append(f"بودجه‌ی اولیه‌ی هر آگهی باید بین ۰ و {st['topup_max_per_ad'] * 5} باشد.")
+    cur = acc.currency or "TON"
+    if mode == "replace" and budget_source == "account":
+        if initial + 1e-9 < min_budget:
+            errors.append(f"بودجه‌ی اولیه‌ی هر آگهی دست‌کم {min_budget:g} {cur} است؛ تلگرام آگهی با بودجه‌ی کمتر نمی‌سازد.")
+        elif initial > st["topup_max_per_ad"] * 5 + 1e-9:
+            errors.append(f"بودجه‌ی اولیه‌ی هر آگهی حداکثر {st['topup_max_per_ad'] * 5:g} {cur} است.")
 
     items: list[dict[str, Any]] = []
-    from_account = from_old = to_new = 0.0
+    from_account = from_old = to_new = net_extra_total = 0.0
     for aid in ad_ids:
         ad, r = ads.get(aid), rows.get(aid)
         it: dict[str, Any] = {
@@ -229,6 +306,8 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
             "money": {"from_account": 0.0, "from_old": 0.0, "to_new": 0.0},
             "warnings": [],
             "blocked": "",
+            "skipped": "",
+            "photo": False,
             "params": {},
         }
         items.append(it)
@@ -244,14 +323,19 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
         new_text = per_ad.get(aid) or text
         new_url = ad.promote_url
         if kind == "referral":
-            if ad.tag_id:
-                it["blocked"] = "این آگهی از قبل برچسب رفرال دارد."
+            if ref_mode == "pool" and ad.tag_id:
+                it["skipped"] = "از قبل برچسب رفرال دارد."
                 continue
             if aid not in url_for:
                 it["blocked"] = "معرفی برای این آگهی نماند."
                 continue
             new_url, rid = url_for[aid]
+            if new_url == ad.promote_url:
+                it["skipped"] = "همین لینک را دارد."
+                continue
             it["params"]["referrer_id"] = rid
+            if ref_mode == "random":
+                it["params"]["random_code"] = True
             it["changes"].append({"field": "promote_url", "label": "لینک", "old": ad.promote_url, "new": new_url})
         if new_text and new_text != ad.text:
             chk = guidelines.check(new_text, promote_url=new_url)
@@ -270,18 +354,21 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
                 )
                 continue
             it["params"]["text"] = ad.text
-        if photo_id:
+        if photo_id and placement.supports_photo(ad):
             it["changes"].append(
                 {"field": "photo", "label": "عکس", "old": "عکس فعلی" if ad.has_photo else "بدون عکس", "new": "عکس تازه"}
             )
             it["params"]["photo_id"] = photo_id
-            if ad.placement == "bot_banner" or ad.target_type == "bots":
-                it["blocked"] = "آگهی ربات عکس ندارد؛ عکس فقط برای آگهی کانال است."
-                continue
+            it["photo"] = True
         if new_url != ad.promote_url:
             it["params"]["promote_url"] = new_url
         if not it["changes"] and kind != "replace":
-            it["blocked"] = "تغییری برای این آگهی نیست."
+            # Photo only, on an ad whose placement has no photo (a bot banner): left out quietly.
+            it["skipped"] = (
+                "رد شد — آگهی ربات عکس ندارد"
+                if photo_id and not placement.supports_photo(ad)
+                else "تغییری برای این آگهی نیست."
+            )
             continue
         if mode == "inplace":
             it["warnings"].insert(
@@ -298,31 +385,56 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
             it["warnings"].append("آگهی قدیمی عکس دارد؛ جایگزین بدون عکس ساخته می‌شود مگر عکس تازه بدهید.")
         old_budget = ad.remaining_budget or 0
         start = min_budget if budget_source == "transfer" else initial
-        moved = min(old_budget, st["topup_max_per_ad"]) if move_old and old_budget > budget.EMPTY else 0.0
+        moved = transfer_amount(old_budget, budget_source, move_old, min_budget, st["topup_max_per_ad"])
+        net_extra = max(0.0, start - old_budget) if budget_source == "transfer" else 0.0
         it["money"] = {
             "from_account": round(start, 5),
             "from_old": round(old_budget, 5),
             "to_new": round(start + moved, 5),
+            "net_extra": round(net_extra, 5),
         }
         it["params"]["initial_budget"] = round(start, 5)
         from_account += start
         from_old += old_budget
         to_new += start + moved
+        net_extra_total += net_extra
+        if net_extra > budget.EMPTY:
+            it["warnings"].append(
+                f"بودجه‌ی آگهی قدیمی ({old_budget:.4g}) کمتر از حداقل {min_budget:g} {cur} است؛ "
+                f"این جایگزینی {net_extra:.4g} {cur} هزینه‌ی خالص اضافه دارد."
+            )
         it["warnings"].insert(0, "آگهی جدید " + REVIEW_WARNING)
         tail = "حذف" if retire == "delete" else "بایگانی (متوقف، بدون بودجه، پنهان از فهرست)"
         it["warnings"].append(
             f"فقط بعد از تأیید آگهی جدید، آگهی قدیمی متوقف می‌شود، ۱۰ دقیقه بعد بودجه‌اش ({old_budget:.4g}) برداشت و "
-            + ("به آگهی جدید منتقل " if moved else "به موجودی حساب برگردانده ")
+            + (
+                f"به موجودی حساب برمی‌گردد و {moved:.4g} {cur} (مازاد بر بودجه‌ی اولیه) به آگهی جدید منتقل "
+                if moved
+                else "به موجودی حساب برگردانده "
+            )
             + f"می‌شود و سپس {tail} می‌شود. اگر آگهی جدید رد شود، آگهی قدیمی دست نمی‌خورد."
         )
-        if move_old and old_budget > st["topup_max_per_ad"]:
+        full = max(0.0, old_budget - min_budget) if budget_source == "transfer" else old_budget
+        if move_old and full > st["topup_max_per_ad"] + 1e-9:
             it["warnings"].append(
-                f"سقف هر شارژ {st['topup_max_per_ad']} است؛ فقط همین مقدار به آگهی جدید می‌رود و بقیه در موجودی حساب می‌ماند."
+                f"سقف هر شارژ {st['topup_max_per_ad']:g} است؛ فقط همین مقدار به آگهی جدید می‌رود و بقیه در موجودی حساب می‌ماند."
             )
 
-    runnable = [i for i in items if not i["blocked"]]
+    runnable = [i for i in items if not i["blocked"] and not i["skipped"]]
+    skipped = [i for i in items if i["skipped"]]
     if not runnable:
-        errors.append("هیچ‌کدام از آگهی‌های انتخاب‌شده قابل اجرا نیست؛ دلیل هر کدام را ببینید.")
+        errors.append("هیچ‌کدام از آگهی‌های انتخاب‌شده تغییری ندارد یا قابل اجرا نیست؛ دلیل هر کدام را ببینید.")
+    photo_summary = ""
+    if photo_id:
+        photo_ads = sum(1 for i in runnable if i["photo"])
+        text_only = sum(1 for i in runnable if not i["photo"])
+        no_photo_skipped = sum(1 for i in skipped if "عکس ندارد" in i["skipped"])
+        parts = [f"عکس برای {photo_ads} آگهی کانال عوض می‌شود"]
+        if text_only:
+            parts.append(f"{text_only} آگهی ربات فقط متنشان عوض می‌شود")
+        if no_photo_skipped:
+            parts.append(f"{no_photo_skipped} آگهی ربات بدون تغییر می‌مانند (آگهی ربات عکس ندارد)")
+        photo_summary = "؛ ".join(parts) + "."
     balance = acc.remaining_budget
     if mode == "replace" and from_account > 0 and live_balance:
         try:
@@ -330,21 +442,46 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
                 balance = float((await c.account()).get("remaining_budget") or 0)
         except (TelegramAdsError, AppError):
             warnings.append("موجودی تازه از تلگرام خوانده نشد؛ آخرین موجودی ذخیره‌شده ملاک است.")
-    if mode == "replace" and from_account > balance + 1e-9:
-        errors.append(
-            f"موجودی حساب ({balance:.4g}) برای بودجه‌ی اولیه‌ی آگهی‌های جدید ({from_account:.4g}) کافی نیست. "
-            + (
-                "حالت «انتقال از آگهی قدیمی» با بودجه‌ی حداقلی شروع می‌کند."
-                if budget_source == "account"
-                else "حساب را شارژ کنید یا آگهی کمتری انتخاب کنید."
-            )
+    budget_line = ""
+    first_wave = len(runnable)
+    if mode == "replace" and runnable:
+        each = min_budget if budget_source == "transfer" else initial
+        n = len(runnable)
+        budget_line = (
+            f"برای ساخت {n} آگهی جدید، {n} × {each:g} = {each * n:.4g} {cur} لازم است؛ "
+            f"موجودی فعلی {balance:.4g} {cur} است."
         )
-    used = await actions.topups_last_24h(s, acc)
-    left = max(0.0, st["topup_daily_cap"] - used)
-    if mode == "replace" and to_new > left + 1e-9:
+        first_wave = min(n, int((balance + 1e-9) // each)) if each > 0 else n
+        if first_wave == 0:
+            errors.append(
+                f"موجودی حساب ({balance:.4g} {cur}) حتی برای ساخت یک آگهی جدید با حداقل بودجه‌ی "
+                f"{each:g} {cur} کافی نیست. حساب را شارژ کنید."
+            )
+        elif first_wave < n:
+            warnings.append(
+                f"موجودی برای همه‌ی آگهی‌های جدید کافی نیست؛ عملیات موج‌به‌موج اجرا می‌شود: موج اول {first_wave} آگهی، "
+                "و هر موج بعدی وقتی بودجه‌ی آگهی‌های قدیمیِ موج قبل (بعد از تأیید آگهی جدید و ۱۰ دقیقه توقف) "
+                "به موجودی برگشت. هر وقت خواستید می‌توانید عملیات را متوقف کنید."
+            )
+            returned = sum(i["money"]["from_old"] for i in runnable) - sum(
+                i["money"]["to_new"] - i["money"]["from_account"] for i in runnable
+            )
+            if balance + returned + 1e-9 < each * n:
+                warnings.append(
+                    "حتی بعد از برگشت بودجه‌ی همه‌ی آگهی‌های قدیمی هم موجودی برای همه‌ی جایگزین‌ها کافی نیست؛ "
+                    "آگهی‌های آخر منتظر شارژ حساب می‌مانند."
+                )
+    if net_extra_total > budget.EMPTY:
         warnings.append(
-            f"شارژ آگهی‌های جدید ({to_new:.4g}) از باقی‌مانده‌ی سقف شارژ روزانه ({left:.4g}) بیشتر است؛ "
-            "بقیه‌ی آگهی‌ها منتظر می‌مانند تا سقف روزانه آزاد شود."
+            f"آگهی‌هایی که بودجه‌ی قدیمی‌شان کمتر از {min_budget:g} {cur} است در مجموع {net_extra_total:.4g} {cur} "
+            "هزینه‌ی خالص اضافه دارند (بودجه‌ی اولیه‌ی آگهی جدید بیشتر از بودجه‌ای است که برمی‌گردد)."
+        )
+    new_used = await actions.new_budget_last_24h(s, acc)
+    new_left = max(0.0, st["bulk_daily_new_budget_cap"] - new_used)
+    if mode == "replace" and from_account > new_left + 1e-9:
+        warnings.append(
+            f"بودجه‌ی اولیه‌ی آگهی‌های جدید ({from_account:.4g} {cur}) از باقی‌مانده‌ی سقف روزانه‌ی آگهی جدید "
+            f"({new_left:.4g} {cur}) بیشتر است؛ بقیه منتظر می‌مانند تا سقف آزاد شود."
         )
     if acc.automation_paused:
         errors.append("اقدام‌های این حساب متوقف است.")
@@ -357,15 +494,23 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
         "photo_test": photo_test,
         "items": items,
         "assignments": assignments,
+        "referral_mode": ref_mode if kind == "referral" else None,
+        "random_tracking": random_tracking,
         "totals": {
             "ads": len(runnable),
-            "blocked": len(items) - len(runnable),
+            "blocked": sum(1 for i in items if i["blocked"]),
+            "skipped": len(skipped),
             "from_account": round(from_account, 5),
             "from_old": round(from_old, 5),
             "to_new": round(to_new, 5),
+            "net_extra": round(net_extra_total, 5),
             "account_balance": balance,
-            "daily_cap_left": round(left, 5),
+            "min_initial_budget": min_budget,
+            "first_wave": first_wave,
+            "new_budget_cap_left": round(new_left, 5),
         },
+        "photo_summary": photo_summary,
+        "budget_line": budget_line,
         "errors": errors,
         "warnings": warnings,
         "capabilities": caps,
@@ -412,8 +557,11 @@ async def create(s: AsyncSession, acc: Account, body: dict[str, Any]) -> BulkOpe
             "retire": p["retire"],
             "photo_test": p["photo_test"],
             "group_by": body.get("group_by") or "",
+            "referral_mode": p["referral_mode"],
             "proposal_ids": [int(x) for x in body.get("proposal_ids") or []],
             "totals": p["totals"],
+            "wave": 1,
+            "waiting_balance": False,
         },
         note="",
     )
@@ -421,19 +569,32 @@ async def create(s: AsyncSession, acc: Account, body: dict[str, Any]) -> BulkOpe
     await s.flush()
     tags: dict[str, int] = {}
     for a in p["assignments"]:
+        if a.get("tag_id"):
+            tags[a["referrer_id"]] = a["tag_id"]
+            continue
         tag = await referrals.ensure_tag(s, acc, a["referrer_id"], a["label"])
         tags[a["referrer_id"]] = tag.id
+    random_items = [
+        it for it in p["items"] if not it["blocked"] and not it["skipped"] and it["params"].get("random_code")
+    ]
+    codes = await tracking.new_codes(s, acc, len(random_items)) if random_items else []
+    for it, code in zip(random_items, codes, strict=True):
+        tag = await tracking.ensure_random_tag(s, acc, code, it["label"])
+        it["params"].update(
+            promote_url=f"https://t.me/{acc.bot_username}?start={code}", referrer_id=code, random_code=code
+        )
+        tags[code] = tag.id
     variants: dict[str, int] = {}
     for it in p["items"]:
         params = dict(it["params"])
-        if it["blocked"]:
+        if it["blocked"] or it["skipped"]:
             s.add(
                 BulkItem(
                     op_id=op.id,
                     account_id=acc.id,
                     ad_id=it["ad_id"],
                     status="skipped",
-                    error=it["blocked"],
+                    error=it["blocked"] or it["skipped"],
                     params=params,
                     created_ts=now,
                     updated_ts=now,
@@ -490,6 +651,7 @@ def item_public(it: BulkItem, ads: dict[int, Ad]) -> dict[str, Any]:
         "withdrawn": it.withdrawn,
         "text": it.params.get("text"),
         "promote_url": it.params.get("promote_url"),
+        "wave": it.params.get("wave"),
         "old_status": old.status if old else None,
         "new_status": new.status if new else None,
         "updated_ts": it.updated_ts,
@@ -605,19 +767,19 @@ def _create_params(op: BulkOperation, it: BulkItem, ad: Ad) -> dict[str, Any] | 
     tgt = create_target(ad)
     if tgt is None:
         return None
-    target, placement = tgt
+    target, slot = tgt
     title = re.sub(r"\s+", " ", f"{ad.title or ad.target_label or ad.ad_id}")[:100] + f" r{op.id}"
     params: dict[str, Any] = {
         "title": title[:120],
         "text": it.params.get("text") or ad.text,
         "promote_url": it.params.get("promote_url") or ad.promote_url,
         "cpm": ad.cpm,
-        "placement": placement,
+        "placement": slot,
         "target": target,
         "initial_budget": float(it.params.get("initial_budget") or 0),
         "return_target": True,
     }
-    if it.params.get("photo_id"):
+    if it.params.get("photo_id") and placement.supports_photo(ad):
         params["photo_id"] = it.params["photo_id"]
     return params
 
@@ -665,14 +827,18 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
                 it.withdrawn = float((last.params or {}).get("done_amount") or 0) if last else 0.0
                 it.step = "transfer" if op.params.get("move_old_budget") and it.withdrawn > budget.EMPTY else "retire"
         elif it.step == "transfer":
-            amount = round(min(it.withdrawn, st["topup_max_per_ad"]), 5)
-            used = await actions.topups_last_24h(s, acc)
-            if used + amount > st["topup_daily_cap"] + 1e-9:
-                op.note = "منتظر آزاد شدن سقف شارژ روزانه برای انتقال بودجه"
-                continue
-            if new is not None:
-                actions.enqueue(s, acc, "topup", new.ad_id, amount, actor="bulk", bulk_item_id=it.id)
-            it.step = "transfer_wait"
+            amount = transfer_amount(
+                it.withdrawn,
+                str(op.params.get("budget_source") or "transfer"),
+                True,
+                float(st["min_initial_budget"]),
+                float(st["topup_max_per_ad"]),
+            )
+            if new is not None and amount > budget.EMPTY:
+                actions.enqueue(s, acc, "transfer", new.ad_id, amount, actor="bulk", bulk_item_id=it.id)
+                it.step = "transfer_wait"
+            else:
+                it.step = "retire"
         elif it.step == "transfer_wait":
             if last is not None and last.status == "failed":
                 it.error = f"انتقال بودجه به آگهی جدید ناموفق بود ({last.result}); مبلغ در موجودی حساب است."
@@ -693,12 +859,17 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
             it.status, it.step = "retired", "done"
         it.updated_ts, changed = now, True
 
-    # Next batch of pending items.
+    # Next batch of pending items. Replacements also need the balance for their initial budget: what the
+    # balance cannot pay for waits for the next wave (withdrawals of the previous wave coming back).
     pending = [i for i in items if i.status == "pending"]
     in_flight = sum(1 for i in items if i.status in ("submitted", "in_review"))
     if pending and now - op.last_batch_ts >= int(st["bulk_batch_interval_seconds"]):
         room = min(int(st["bulk_batch_size"]), max(0, int(st["bulk_max_in_review"]) - in_flight))
         sent = 0
+        available = acc.remaining_budget - await actions.reserved_new_budget(s, acc)
+        new_used = await actions.new_budget_last_24h(s, acc)
+        short_of_balance = False
+        cur = acc.currency or "TON"
         for it in pending[:room]:
             ad = ads.get(it.ad_id)
             if ad is None or ad.gone:
@@ -712,10 +883,18 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
                 if params is None:
                     it.status, it.error = "skipped", "هدف‌گیری این آگهی قابل کپی نیست"
                     continue
-                used = await actions.topups_last_24h(s, acc)
-                if used + params["initial_budget"] > st["topup_daily_cap"] + 1e-9:
-                    op.note = "منتظر آزاد شدن سقف شارژ روزانه"
+                need = float(params["initial_budget"])
+                if need + 1e-9 < float(st["min_initial_budget"]):
+                    it.status, it.error = "failed", f"بودجه‌ی اولیه کمتر از حداقل {st['min_initial_budget']:g} است"
+                    continue
+                if need > available + 1e-9:
+                    short_of_balance = True
                     break
+                if new_used + need > st["bulk_daily_new_budget_cap"] + 1e-9:
+                    op.note = "منتظر آزاد شدن سقف روزانه‌ی بودجه‌ی آگهی جدید"
+                    break
+                available -= need
+                new_used += need
                 actions.enqueue(
                     s,
                     acc,
@@ -727,9 +906,37 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
                     actor="bulk",
                 )
             it.status, it.updated_ts = "submitted", now
+            it.params = {**it.params, "wave": int(op.params.get("wave") or 1)}
             sent += 1
+        params_now = dict(op.params)
         if sent:
             op.last_batch_ts, changed = now, True
+            if params_now.get("waiting_balance"):
+                params_now.update(wave=int(params_now.get("wave") or 1) + 1, waiting_balance=False)
+                for it in [i for i in pending if i.status == "submitted"]:
+                    it.params = {**it.params, "wave": params_now["wave"]}
+            if not short_of_balance and op.note.startswith("موج"):
+                op.note = ""
+        if short_of_balance and not params_now.get("waiting_balance"):
+            params_now["waiting_balance"] = True
+            changed = True
+        if short_of_balance:
+            waiting_for = sum(1 for i in items if i.status == "pending")
+            in_progress = any(
+                i.status in ("submitted", "in_review") or (i.status == "approved" and i.step not in ("", "done"))
+                for i in items
+            )
+            op.note = (
+                f"موج {params_now.get('wave') or 1}: {waiting_for} آگهی منتظر موجودی‌اند (موجودی آزاد "
+                f"{max(available, 0):.4g} {cur})؛ "
+                + (
+                    "با برگشت بودجه‌ی آگهی‌های قدیمیِ این موج، موج بعد خودکار شروع می‌شود."
+                    if in_progress
+                    else "کار دیگری در جریان نیست؛ حساب را شارژ کنید تا ادامه پیدا کند."
+                )
+            )
+        if params_now != op.params:
+            op.params = params_now
 
     # Finished?
     await s.flush()

@@ -62,9 +62,10 @@ export interface AccountSettings {
   bulk_batch_size: number;
   bulk_batch_interval_seconds: number;
   bulk_max_in_review: number;
-  bulk_min_budget: number;
-  tracking_mode: "pool" | "campaign";
+  min_initial_budget: number;
+  bulk_daily_new_budget_cap: number;
   referrer_pool: string[];
+  random_tracking: "works" | "ignored" | "unknown";
 }
 
 export interface Account {
@@ -125,10 +126,28 @@ export interface WindowStats {
   new_users: number | null;
 }
 
+export interface TodayStats extends WindowStats {
+  since_ts: number;
+  compare_until_ts: number;
+  tz: string;
+  prev_new_users: number | null;
+}
+
+export interface Attributed {
+  buyers: number;
+  purchases: number;
+  revenue: number;
+  users: number;
+  ad_spend: number;
+  cpp: number | null;
+}
+
 export interface Summary {
+  today: TodayStats;
   "7": WindowStats;
   "28": WindowStats;
-  attributed_28: { buyers: number; purchases: number; revenue: number; users: number; ad_spend: number; cpp: number | null };
+  attributed_28: Attributed;
+  attributed_today: Attributed;
   roas_28: number | null;
   counts: { running: number; review: number; declined: number; total: number };
   balance: { account: number; on_ads: number; spent_total: number; on_running_ads: number };
@@ -234,6 +253,17 @@ export interface AdRow {
   others_views_in_streak: number;
   archived: boolean;
   created_by_app: boolean;
+  tag_kind?: string | null;
+  period_stats?: { views: number; clicks: number; actions: number; spent: number };
+}
+
+export interface AdsPeriod {
+  preset: string;
+  from: string | null;
+  to: string | null;
+  source: "baseline" | "daily" | "lifetime";
+  tz: string;
+  since_ts?: number;
 }
 
 export type AdWindow = "7" | "28" | "since" | "all";
@@ -434,6 +464,9 @@ export interface BulkRequest {
   initial_budget?: number;
   topup_after_withdraw?: boolean;
   group_by?: "target" | "cpm" | "placement";
+  referral_mode?: "pool" | "shared" | "random";
+  shared_referrer_id?: string;
+  shared_tag_id?: number;
   proposal_ids?: number[];
   confirm?: boolean;
 }
@@ -443,9 +476,11 @@ export interface BulkPreviewItem {
   label: string;
   placement: string;
   changes: { field: string; label: string; old: string; new: string }[];
-  money: { from_account: number; from_old: number; to_new: number };
+  money: { from_account: number; from_old: number; to_new: number; net_extra?: number };
   warnings: string[];
   blocked: string;
+  skipped: string;
+  photo: boolean;
 }
 
 export interface BulkPreview {
@@ -460,12 +495,20 @@ export interface BulkPreview {
   totals: {
     ads: number;
     blocked: number;
+    skipped: number;
     from_account: number;
     from_old: number;
     to_new: number;
+    net_extra: number;
     account_balance: number;
-    daily_cap_left: number;
+    min_initial_budget: number;
+    first_wave: number;
+    new_budget_cap_left: number;
   };
+  photo_summary: string;
+  budget_line: string;
+  referral_mode: "pool" | "shared" | "random" | null;
+  random_tracking: string;
   errors: string[];
   warnings: string[];
   capabilities: Capabilities;
@@ -494,6 +537,7 @@ export interface BulkItem {
   withdrawn: number;
   text: string | null;
   promote_url: string | null;
+  wave: number | null;
   old_status: string | null;
   new_status: string | null;
   updated_ts: number;
@@ -504,7 +548,15 @@ export interface BulkOperation {
   kind: BulkKind;
   mode: BulkMode;
   status: "running" | "stopped" | "done";
-  params: Record<string, unknown> & { has_photo?: boolean; text?: string | null; retire?: string; budget_source?: string };
+  params: Record<string, unknown> & {
+    has_photo?: boolean;
+    text?: string | null;
+    retire?: string;
+    budget_source?: string;
+    wave?: number;
+    waiting_balance?: boolean;
+    referral_mode?: string | null;
+  };
   total: number;
   counts: Partial<Record<BulkItemStatus, number>>;
   finished: number;
@@ -525,12 +577,24 @@ export interface PoolEntry {
   check: { exists: boolean; invited: number | null; error: string; ts: number } | null;
 }
 
+export interface RandomTest {
+  code: string;
+  link: string;
+  created_ts: number;
+  users_before: number | null;
+  users_after?: number | null;
+  listed?: number;
+  result: "works" | "ignored" | "unknown" | null;
+  checked_ts: number;
+}
+
 export interface TrackingInfo {
-  mode: "pool" | "campaign";
-  modes: { key: string; label: string; available: boolean; description: string }[];
+  modes: { key: string; label: string; description: string }[];
   campaign_request: string;
-  campaign_example: string;
+  random_example: string;
+  random: { result: "works" | "ignored" | "unknown"; test: RandomTest | null };
   pool: PoolEntry[];
+  tags: { id: number; name: string; start_code: string; kind: string }[];
 }
 
 export interface TextIssue {

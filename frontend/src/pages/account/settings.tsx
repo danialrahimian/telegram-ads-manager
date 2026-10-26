@@ -95,7 +95,8 @@ export default function AccountSettingsPage() {
           { key: "bulk_batch_size", label: "تعداد آگهی در هر دسته", step: 1 },
           { key: "bulk_batch_interval_seconds", label: "فاصله‌ی دسته‌ها (ثانیه)", step: 10 },
           { key: "bulk_max_in_review", label: "حداکثر آگهی هم‌زمان در بررسی", step: 1 },
-          { key: "bulk_min_budget", label: "بودجه‌ی اولیه‌ی آگهی جایگزین (حالت انتقال)", step: 0.01 },
+          { key: "min_initial_budget", label: "حداقل بودجه‌ی اولیه‌ی آگهی (حداقل تلگرام: ۱ TON)", step: 0.1 },
+          { key: "bulk_daily_new_budget_cap", label: "سقف روزانه‌ی بودجه‌ی اولیه‌ی آگهی‌های جایگزین", step: 1 },
         ]}
       />
       <div className="grid gap-5 xl:grid-cols-2">
@@ -642,7 +643,6 @@ function TrackingCard({ account }: { account: Account }) {
     invalidate: [[...keys.acc(account.slug), "tracking"]],
     success: "معرف‌ها در ربات بررسی شدند.",
   });
-  const campaign = tracking.data?.modes.find((m) => m.key === "campaign");
   return (
     <Card id="tracking">
       <CardHeader>
@@ -655,28 +655,6 @@ function TrackingCard({ account }: { account: Account }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="حالت ردیابی">
-          <div className="rounded-lg border border-primary bg-accent/50 p-3 text-sm" role="radio" aria-checked>
-            <div className="font-medium">استخر معرف‌ها (فعال)</div>
-            <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              {tracking.data?.modes.find((m) => m.key === "pool")?.description}
-            </div>
-          </div>
-          <div className="rounded-lg border border-dashed p-3 text-sm opacity-80" role="radio" aria-checked={false} aria-disabled>
-            <div className="flex items-center gap-2 font-medium">
-              کد کمپین <Badge variant="secondary">نیاز به پشتیبانی ربات دارد</Badge>
-            </div>
-            <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              {campaign?.description} نمونه: <span className="ltr">{tracking.data?.campaign_example}</span>
-            </div>
-            {tracking.data?.campaign_request && (
-              <div className="mt-2 flex items-center gap-1 text-xs">
-                <span className="text-muted-foreground">متن درخواست برای توسعه‌دهنده‌ی ربات</span>
-                <CopyButton value={tracking.data.campaign_request} label="کپی متن درخواست" />
-              </div>
-            )}
-          </div>
-        </div>
         <Field
           label="شناسه‌ی عددی حساب‌های معرفِ خودتان"
           htmlFor="pool-ids"
@@ -728,8 +706,73 @@ function TrackingCard({ account }: { account: Account }) {
             ))}
           </div>
         )}
+        <RandomTrackingTest account={account} />
       </CardContent>
     </Card>
+  );
+}
+
+const RANDOM_RESULT: Record<string, { label: string; variant: "success" | "warning" | "secondary" }> = {
+  works: { label: "کار می‌کند: ربات کاربران کد رندوم را ثبت می‌کند", variant: "success" },
+  ignored: { label: "ربات کد ناشناخته را نادیده می‌گیرد", variant: "warning" },
+  unknown: { label: "آزمایش نشده / هنوز کسی لینک را استارت نکرده", variant: "secondary" },
+};
+
+/** Does the bot record users who start it with an unknown numeric code? (decides whether random links track sales) */
+function RandomTrackingTest({ account }: { account: Account }) {
+  const tracking = useTracking(account.slug);
+  const base = accountApi(account.slug);
+  const inv = [keys.acc(account.slug), keys.accounts];
+  const start = useAction<void>({
+    fn: () => api.post(`${base}/tracking/random/test`),
+    invalidate: inv,
+    success: "کد آزمایشی ساخته شد.",
+  });
+  const check = useAction<void, { test: { result: string } }>({
+    fn: () => api.post(`${base}/tracking/random/check`),
+    invalidate: inv,
+    success: (r) => RANDOM_RESULT[r.test.result]?.label ?? "بررسی شد.",
+  });
+  const result = tracking.data?.random.result ?? account.settings.random_tracking;
+  const test = tracking.data?.random.test;
+  return (
+    <div className="space-y-3 rounded-lg border p-3" id="random-test" data-testid="random-test">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm font-medium">آزمایش ردیابی کد رندوم</div>
+        <Badge variant={RANDOM_RESULT[result]?.variant ?? "secondary"}>{RANDOM_RESULT[result]?.label ?? result}</Badge>
+      </div>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        گزینه‌ی «لینک رندوم اختصاصی برای هر آگهی» برای هر آگهی یک کد عددی تصادفی می‌سازد. ربات فعلاً فقط وقتی کاربر را به یک منبع
+        نسبت می‌دهد که start شناسه‌ی یک کاربر موجود باشد و معلوم نیست کد ناشناخته را ذخیره کند. این آزمایش آن را مشخص می‌کند:
+      </p>
+      <ol className="list-decimal space-y-1 ps-5 text-xs leading-relaxed text-muted-foreground">
+        <li>«ساخت کد آزمایشی» را بزنید.</li>
+        <li>با یک حساب تلگرامی که تا حالا این ربات را استارت نکرده، لینک زیر را باز و ربات را استارت کنید.</li>
+        <li>«بررسی نتیجه» را بزنید.</li>
+      </ol>
+      {test?.link && (
+        <div className="flex items-center gap-1 rounded-md bg-muted/50 px-2 py-1.5 text-xs">
+          <span className="ltr min-w-0 flex-1 truncate" data-testid="random-test-link">
+            {test.link}
+          </span>
+          <CopyButton value={test.link} />
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={() => start.mutate()} disabled={start.isPending || !account.bot.configured}>
+          ساخت کد آزمایشی
+        </Button>
+        <Button size="sm" onClick={() => check.mutate()} disabled={check.isPending || !test?.code}>
+          بررسی نتیجه
+        </Button>
+      </div>
+      {result !== "works" && tracking.data?.campaign_request && (
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          اگر ربات کد ناشناخته را ذخیره نمی‌کند، این متن را برای توسعه‌دهنده‌ی ربات بفرستید
+          <CopyButton value={tracking.data.campaign_request} label="کپی متن درخواست" />
+        </div>
+      )}
+    </div>
   );
 }
 

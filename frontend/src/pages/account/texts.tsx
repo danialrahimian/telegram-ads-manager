@@ -192,7 +192,7 @@ function TextCard({ t, onEdit }: { t: TextVariant; onEdit: (e: Editing) => void 
           </Button>
           {(p.ads ?? 0) > 0 && (
             <Button size="sm" variant="outline" asChild>
-              <Link to={`/accounts/${account.slug}/ads?text_id=${t.id}&select=all`}>
+              <Link to={`/accounts/${account.slug}/ads?variant=${t.id}&select=all`}>
                 <ListChecksIcon /> آگهی‌های این متن
               </Link>
             </Button>

@@ -253,6 +253,7 @@ async def ad_rows(
             "variant_id": a.variant_id,
             "tag_id": a.tag_id,
             "tag_name": tags[a.tag_id].name if a.tag_id in tags else None,
+            "tag_kind": tags[a.tag_id].kind if a.tag_id in tags else None,
             "tag_shared": shared,
             "first_day": first.get(a.ad_id, (None, None))[0],
             "last_spend_day": first.get(a.ad_id, (None, None))[1],
@@ -344,11 +345,93 @@ async def _sales_window(s: AsyncSession, acc: Account, since_ts: int, until_ts: 
     return {"purchases": int(purchases or 0), "buyers": int(buyers or 0), "revenue": float(revenue or 0)}
 
 
+async def _snapshot_at(s: AsyncSession, account_id: int, ts: int, *, after: int | None = None) -> Any:
+    """The last snapshot at or before `ts` (or, failing that, the first one after `after`)."""
+    row = (
+        await s.execute(
+            select(
+                AccountSnapshot.ts,
+                AccountSnapshot.spent_budget,
+                AccountSnapshot.views,
+                AccountSnapshot.clicks,
+                AccountSnapshot.actions,
+            )
+            .where(AccountSnapshot.account_id == account_id, AccountSnapshot.ts <= ts)
+            .order_by(AccountSnapshot.ts.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None and after is not None:
+        row = (
+            await s.execute(
+                select(
+                    AccountSnapshot.ts,
+                    AccountSnapshot.spent_budget,
+                    AccountSnapshot.views,
+                    AccountSnapshot.clicks,
+                    AccountSnapshot.actions,
+                )
+                .where(AccountSnapshot.account_id == account_id, AccountSnapshot.ts >= after, AccountSnapshot.ts <= ts)
+                .order_by(AccountSnapshot.ts)
+                .limit(1)
+            )
+        ).first()
+    return row
+
+
+async def _snap_delta(s: AsyncSession, account_id: int, start: int, end: int) -> dict[str, Any]:
+    base = await _snapshot_at(s, account_id, start, after=start)
+    last = await _snapshot_at(s, account_id, end)
+    if base is None or last is None or last[0] < base[0]:
+        return {"spent": 0.0, "views": 0, "clicks": 0, "starts": 0}
+    return {
+        "spent": round(max(last[1] - base[1], 0.0), 5),
+        "views": max(last[2] - base[2], 0),
+        "clicks": max(last[3] - base[3], 0),
+        "starts": max(last[4] - base[4], 0),
+    }
+
+
+async def today_window(s: AsyncSession, acc: Account, now: int) -> dict[str, Any]:
+    """Today from local midnight (the bot's time zone), compared with yesterday up to the same hour.
+
+    Spend, views, clicks and starts come from the intraday account snapshots; sales from the bot's
+    transactions; new bot users from the growth of its user count.
+    """
+    from app.services import periods
+
+    tz = periods.tz_of(acc)
+    midnight, prev_midnight, prev_now = periods.day_bounds(tz, now)
+    cur = await _snap_delta(s, acc.id, midnight, now)
+    prev = await _snap_delta(s, acc.id, prev_midnight, prev_now)
+    sales = await _sales_window(s, acc, midnight, now + 1)
+    prev_sales = await _sales_window(s, acc, prev_midnight, prev_now)
+    return {
+        **cur,
+        "cps": _ratio(cur["spent"], cur["starts"]),
+        "prev_cps": _ratio(prev["spent"], prev["starts"]),
+        "prev_spent": prev["spent"],
+        "prev_starts": prev["starts"],
+        "ctr": _ratio(cur["clicks"], cur["views"]),
+        "start_rate": _ratio(cur["starts"], cur["clicks"]),
+        **sales,
+        "prev_revenue": prev_sales["revenue"],
+        "prev_buyers": prev_sales["buyers"],
+        "new_users": await _bot_new_users(s, acc.id, midnight),
+        "prev_new_users": await _bot_new_users(s, acc.id, prev_midnight, prev_now),
+        "since_ts": midnight,
+        "compare_until_ts": prev_now,
+        "tz": str(tz),
+    }
+
+
 async def summary(s: AsyncSession, acc: Account) -> dict[str, Any]:
+    from app.services import periods
+
     t = today_utc()
     st = settings_of(acc)
     now = now_ts()
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"today": await today_window(s, acc, now)}
     for key, days in (("7", 7), ("28", 28)):
         since = (t - timedelta(days=days - 1)).isoformat()
         prev_since = (t - timedelta(days=2 * days - 1)).isoformat()
@@ -411,6 +494,17 @@ async def summary(s: AsyncSession, acc: Account) -> dict[str, Any]:
         "users": sum(v["users"] for v in tagged.values()),
         "ad_spend": tagged_ad_spend,
         "cpp": _ratio(tagged_ad_spend, attr_buyers),
+    }
+    tagged_today = await tag_sales(s, acc, out["today"]["since_ts"])
+    spend_today = await periods.tagged_spent_today(s, acc, now)
+    buyers_today = sum(v["buyers"] for v in tagged_today.values())
+    out["attributed_today"] = {
+        "buyers": buyers_today,
+        "purchases": sum(v["purchases"] for v in tagged_today.values()),
+        "revenue": sum(v["revenue"] for v in tagged_today.values()),
+        "users": sum(v["users"] for v in tagged_today.values()),
+        "ad_spend": round(spend_today, 5),
+        "cpp": _ratio(spend_today, buyers_today),
     }
     rate = float(st.get("toman_per_unit") or 0)
     out["roas_28"] = _ratio(out["28"]["revenue"], out["28"]["spent"] * rate) if rate else None
@@ -606,6 +700,7 @@ async def tag_rows(s: AsyncSession, acc: Account) -> list[dict[str, Any]]:
                 "name": tg.name,
                 "referrer_id": tg.referrer_id,
                 "start_code": tg.start_code,
+                "kind": tg.kind,
                 "note": tg.note,
                 "link": f"https://t.me/{acc.bot_username}?start={tg.start_code}" if acc.bot_username else "",
                 "referred_count": tg.referred_count,

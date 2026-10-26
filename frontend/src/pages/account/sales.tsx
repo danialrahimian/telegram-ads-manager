@@ -119,7 +119,7 @@ export default function SalesPage() {
               اجرا پیش‌نمایش می‌بینید.
             </p>
             <Button asChild size="sm" className="mt-2">
-              <Link to={`/accounts/${account.slug}/ads?tag=none&select=all&bulk=referral`}>ساخت برچسب برای همه</Link>
+              <Link to={`/accounts/${account.slug}/ads?referral=without&select=all&bulk=referral`}>ساخت برچسب برای همه</Link>
             </Button>
           </AlertDescription>
         </Alert>

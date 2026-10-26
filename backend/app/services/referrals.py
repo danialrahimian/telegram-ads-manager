@@ -247,3 +247,45 @@ async def ensure_tag(s: AsyncSession, acc: Account, referrer_id: str, label: str
     if tag is not None:
         return tag
     return await create(s, acc, f"رفرال {label}"[:80], referrer_id, referrer_id, note="ساخته‌شده با عملیات گروهی")
+
+
+async def resolve_shared(
+    s: AsyncSession, acc: Account, referrer_id: Any, tag_id: Any, *, check: bool = True
+) -> dict[str, Any]:
+    """The one link given to every selected ad: an existing tag, or a referrer id (from the pool or typed).
+
+    Unlike the pool assignment, a referrer or tag already used by live ads is fine here.
+    """
+    if tag_id:
+        tag = await s.get(ReferralTag, int(tag_id))
+        if tag is None or tag.account_id != acc.id:
+            return {"error": "برچسب انتخاب‌شده پیدا نشد."}
+        return {
+            "referrer_id": tag.referrer_id,
+            "start_code": tag.start_code,
+            "tag_id": tag.id,
+            "label": tag.name,
+        }
+    rid = str(referrer_id or "").strip()
+    if not rid:
+        return {"error": "برای لینک مشترک یک معرف یا برچسب انتخاب کنید."}
+    if not ID_RE.match(rid):
+        return {"error": "شناسه‌ی معرف باید عددی باشد."}
+    existing = (await tags_by_referrer(s, acc)).get(rid)
+    if existing is not None:
+        return {
+            "referrer_id": rid,
+            "start_code": existing.start_code,
+            "tag_id": existing.id,
+            "label": existing.name,
+        }
+    out: dict[str, Any] = {"referrer_id": rid, "start_code": rid, "tag_id": None, "label": f"لینک مشترک {rid}"}
+    if check:
+        res = await accounts.lookup_referrer(acc, rid)
+        if not res.get("ok"):
+            return {"error": f"شناسه‌ی {rid} در ربات کاربر نیست یا بررسی نشد: {res.get('error') or ''}".strip()}
+        if res.get("referred"):
+            out["warning"] = (
+                f"معرف {rid} از قبل {res['referred']} دعوت دارد؛ آمار این آگهی‌ها با دعوت‌های قبلی مخلوط می‌شود."
+            )
+    return out

@@ -17,6 +17,11 @@ export function money(v: number | null | undefined, currency?: string | null, di
   return currency ? `${s} ${currencyLabel(currency)}` : s;
 }
 
+/** Latin digits in a server-written Persian sentence shown as Persian digits (the decimal point too). */
+export function faDigits(s: string): string {
+  return s.replace(/(\d)\.(\d)/g, "$1٫$2").replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
+}
+
 export function currencyLabel(c?: string | null): string {
   if (!c) return "";
   const u = c.toUpperCase();

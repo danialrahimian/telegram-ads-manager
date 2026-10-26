@@ -23,7 +23,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { BULK_KIND_LABEL, BULK_MODE_LABEL, ITEM_VARIANT, STEP_LABEL } from "@/lib/bulk";
-import { dateTime, money, num } from "@/lib/format";
+import { dateTime, faDigits, money, num } from "@/lib/format";
 import { accountApi, keys, useAction, useBulkOp, useBulkOps } from "@/lib/queries";
 import type { Account, BulkItem, BulkOperation, Capabilities } from "@/lib/types";
 
@@ -185,7 +185,12 @@ function OperationDetail({ account, id }: { account: Account; id: number }) {
         <CardContent className="space-y-2">
           <Progress value={op.progress * 100} aria-label="پیشرفت" />
           <Counts op={op} />
-          {op.note && <p className="text-xs text-muted-foreground">{op.note}</p>}
+          {op.note && (
+            <p className="text-xs text-muted-foreground" data-testid="bulk-note">
+              {faDigits(op.note)}
+            </p>
+          )}
+          <Waves op={op} />
           {op.params.text && (
             <p className="rounded-md bg-muted/50 p-2 text-sm leading-7 wrap-anywhere">{String(op.params.text)}</p>
           )}
@@ -258,6 +263,37 @@ function OperationDetail({ account, id }: { account: Account; id: number }) {
         </CardContent>
       </Card>
       {resubmit && <ResubmitDialog account={account} opId={op.id} item={resubmit} onClose={() => setResubmit(null)} />}
+    </div>
+  );
+}
+
+/** Replacements limited by the account balance go out in waves: progress of each one. */
+function Waves({ op }: { op: BulkOperation }) {
+  const items = (op.items ?? []).filter((i) => i.status !== "skipped" || i.wave);
+  const waves = new Map<number, { total: number; done: number }>();
+  for (const it of items) {
+    if (!it.wave) continue;
+    const w = waves.get(it.wave) ?? { total: 0, done: 0 };
+    w.total += 1;
+    if (["retired", "failed", "declined"].includes(it.status) || (op.mode === "inplace" && it.status === "approved")) w.done += 1;
+    waves.set(it.wave, w);
+  }
+  const waiting = (op.items ?? []).filter((i) => i.status === "pending").length;
+  if (op.mode !== "replace" || (waves.size <= 1 && !op.params.waiting_balance)) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 text-xs" data-testid="bulk-waves">
+      {[...waves.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([n, w]) => (
+          <Badge key={n} variant={w.done === w.total ? "success" : "info"} className="num">
+            موج {num(n)}: {num(w.done)} از {num(w.total)}
+          </Badge>
+        ))}
+      {waiting > 0 && (
+        <Badge variant="secondary" className="num">
+          منتظر موج بعد: {num(waiting)}
+        </Badge>
+      )}
     </div>
   );
 }

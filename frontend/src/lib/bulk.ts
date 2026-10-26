@@ -65,3 +65,9 @@ export const STEP_LABEL: Record<string, string> = {
   delete_wait: "حذف آگهی قدیمی",
   done: "",
 };
+
+/** Same rule as the backend (services/placement.py): only channel ads carry a photo. */
+export function supportsPhoto(t: { placement?: string; target_type?: string }): boolean {
+  if (t.placement) return t.placement === "channel_post" || t.placement === "channels";
+  return t.target_type === "channels";
+}

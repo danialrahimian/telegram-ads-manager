@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.2.0 — Telegram-style ads table, 1 TON minimum and waves, random referral links, today
+
+**Photos only where Telegram shows them**
+- One rule (`supports_photo`) decides whether an ad can carry a photo: channel ads can, bot ads cannot. It is used by the bulk preview, by replacement creation and by the new-ad form (which hides the photo field for bots).
+- A bulk photo change on a mix of ads changes the photo of the channel ads only. Bot ads get the new text when there is one; with a photo only they are quietly left out ("رد شد — آگهی ربات عکس ندارد"), not blocked. The preview says how many channel ads get the photo and how many bot ads only change their text or stay as they are.
+
+**Minimum initial budget**
+- `min_initial_budget` (default 1 TON) replaces `bulk_min_budget`. No path creates an ad under it: the panel shows a Persian error before asking Telegram, and Telegram's budget-minimum errors are translated.
+- The replacement preview states "N new ads need N × 1 TON; the balance is M TON". With too little balance the operation runs in waves (stoppable, with progress per wave); the next wave starts with the money the old ads give back. With not even enough for one ad, the preview refuses.
+- "Transfer from the old ad" moves only the excess of the old budget over the minimum; for old ads under 1 TON the net extra cost is shown.
+- Initial budgets of replacement ads have their own daily cap (`bulk_daily_new_budget_cap`) and no longer count against the daily top-up cap.
+
+**Referral links: three options**
+- From the referrer pool (as before), one shared link for all selected ads (a referrer id or an existing tag, even one already in use, with a warning that sales are only seen for the whole group), or a random unique 10-digit code per ad with its own tag. Each random code is checked with the bot (`users → user`) not to be a real user.
+- "Random code tracking test" in the account settings: the panel makes a test code and link, you start the bot from a new Telegram account, and the check reads `affiliates_users` and the user count to store `works`, `ignored` or `unknown`. Until it says `works`, the random option shows a warning with the request text for the bot's developer.
+- The former "campaign code" layer in `tracking.py` became the random mode; the replacement and in-place flows are the same for all three options.
+
+**Ads table like Telegram Ads**
+- The list part of the ads page (table, filters, bulk bar, mobile cards) is English and left-to-right: Latin digits, dates as "MMM d, yyyy", statuses Active / On Hold / In Review / Declined / Stopped.
+- Columns Ad, Status, CPM, Views, Clicks, Actions, CTR, CVR, CPC, CPA, Spent, Budget, Target, Date Added, plus Buyers, Cost/Buyer, Referral and Empty for; sortable headers and a Columns menu remembered in the browser.
+- Combinable filters kept in the address: search, status, placement, period (Today, Yesterday, Last 7 days, Last 30 days, This month, All time, Custom), CPM and budget ranges, budget left, target type, with/without referral, text variant, has photo, date added, with a result count and "Reset filters". "Select all N results" selects only the filtered ads.
+- `GET /ads` takes `period` (or `from`/`to`) and returns each ad's numbers for that period. Today comes from per-ad baselines recorded at local midnight, because Telegram's daily stats are per UTC day.
+- On mobile: cards, filters in a sheet and a fixed bulk bar.
+
+**Dashboard "today"**
+- A "today" tab next to 7 and 28 days (7 days stays the default): from 00:00 in the bot's time zone (Asia/Tehran by default), compared with yesterday up to the same hour, including cost per customer from referral tags.
+
 ## v2.1.0 — budget history, bulk operations, bot diagnostics
 
 **Budget-aware rules**

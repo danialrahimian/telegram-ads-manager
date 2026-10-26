@@ -1,409 +1,358 @@
 import {
   ArchiveIcon,
-  ArrowDownWideNarrowIcon,
+  ArrowDownIcon,
+  ArrowUpDownIcon,
+  ArrowUpIcon,
+  ColumnsIcon,
   LinkIcon,
   ListChecksIcon,
   MegaphoneIcon,
   PencilLineIcon,
   PlusIcon,
+  RotateCcwIcon,
   SearchIcon,
+  SlidersHorizontalIcon,
   TagIcon,
-  WalletIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { AdActions } from "@/components/ad-actions";
-import { AdStatusBadge, placementLabel } from "@/components/ad-status";
+import {
+  activeFilterCount,
+  COLUMNS,
+  type ColumnId,
+  type Filters,
+  loadColumns,
+  matches,
+  parseFilters,
+  PERIOD_LABEL,
+  type PeriodKey,
+  periodNumbers,
+  placementKey,
+  RESET_PATCH,
+  saveColumns,
+  sortRows,
+  STATUS_KEYS,
+  STATUS_LABEL,
+  statusKey,
+  writeFilters,
+} from "@/components/ads-list/model";
 import { BulkDialog } from "@/components/bulk-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { useAccountCtx } from "@/components/layout/account-layout";
-import { PageHeader } from "@/components/page-header";
 import { QueryError } from "@/components/query-error";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { budgetless, headerState, toggleAll, toggleOne } from "@/lib/bulk";
-import { currencyLabel, money, num, pct } from "@/lib/format";
+import { headerState, toggleAll, toggleOne } from "@/lib/bulk";
+import { enDate, enMoney, enNum, enPct } from "@/lib/format-en";
 import { useAds, useTexts } from "@/lib/queries";
-import type { AdRow, AdWindow, BulkKind } from "@/lib/types";
+import type { AdRow, BulkKind, TextVariant } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type StatusFilter = "all" | "running" | "review" | "stopped" | "declined" | "archived";
-type SortKey = "spent" | "starts" | "cps" | "remaining" | "newest" | "buyers";
+const STATUS_VARIANT = {
+  active: "success",
+  on_hold: "warning",
+  in_review: "info",
+  declined: "destructive",
+  stopped: "secondary",
+} as const;
 
-function windowed(a: AdRow, w: AdWindow) {
-  if (w === "all") return { spent: a.spent, starts: a.starts, clicks: a.clicks, views: a.views, cps: a.cps };
-  const k = w as "7" | "28" | "since";
-  return {
-    spent: a[`spent_${k}`],
-    starts: a[`starts_${k}`],
-    clicks: a[`clicks_${k}`],
-    views: a[`views_${k}`],
-    cps: a[`cps_${k}`],
-  };
-}
+const PLACEMENT_LABEL = { channels: "Channel", bots: "Bot", search: "Search" } as const;
 
-function matchStatus(a: AdRow, f: StatusFilter) {
-  if (f === "all" || f === "archived") return true;
-  if (f === "running") return a.running;
-  if (f === "review") return a.status === "in_review" || a.status === "ready_for_review";
-  if (f === "declined") return a.status === "declined";
-  return a.status === "stopped" || a.is_paused;
-}
-
+/** The ads list, styled and worded like ads.telegram.org (English, left to right); the rest of the panel stays Persian. */
 export default function AdsPage() {
   const account = useAccountCtx();
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
-  const win = (params.get("w") as AdWindow) || "7";
-  const status = (params.get("status") as StatusFilter) || "all";
-  const sort = (params.get("sort") as SortKey) || "spent";
-  const since = params.get("since") || "";
-  const tagFilter = params.get("tag") || "";
-  const textId = params.get("text_id") || "";
-  const [q, setQ] = useState("");
-  const archived = status === "archived";
-  const { data, isLoading, error, refetch } = useAds(account.slug, win === "since" && since ? since : undefined, archived);
+  const f = useMemo(() => parseFilters(params), [params]);
+  const { data, isLoading, error, refetch } = useAds(account.slug, {
+    period: f.period,
+    from: f.from,
+    to: f.to,
+    archived: f.archived,
+  });
   const texts = useTexts(account.slug);
-  const cur = account.telegram.currency;
-  const stopCps = account.settings.stop_cost_per_start;
+  const cur = account.telegram.currency || "TON";
+  const [columns, setColumns] = useState<ColumnId[]>(loadColumns);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulk, setBulk] = useState<BulkKind | null>(null);
   const autoOpened = useRef(false);
-  const textVariant = textId ? texts.data?.find((t) => String(t.id) === textId) : undefined;
+  const variantText = f.variant ? texts.data?.find((t) => String(t.id) === f.variant)?.text : undefined;
 
-  const set = (k: string, v: string) => {
-    const next = new URLSearchParams(params);
-    if (v) next.set(k, v);
-    else next.delete(k);
-    setParams(next, { replace: true });
-  };
+  const set = (patch: Partial<Filters>) => setParams(writeFilters(params, patch), { replace: true });
 
-  const rows = useMemo(() => {
-    const term = q.trim().toLowerCase();
-    const list = (data?.ads ?? []).filter(
-      (a) =>
-        matchStatus(a, status) &&
-        (tagFilter !== "none" || !a.tag_id) &&
-        (!textId ||
-          String(a.variant_id) === textId ||
-          (!!textVariant && a.text.trim() === textVariant.text.trim())) &&
-        (!term ||
-          String(a.ad_id).includes(term) ||
-          a.text.toLowerCase().includes(term) ||
-          a.target_label.toLowerCase().includes(term) ||
-          (a.tag_name ?? "").toLowerCase().includes(term)),
-    );
-    const val = (a: AdRow) => {
-      const w = windowed(a, win);
-      switch (sort) {
-        case "starts":
-          return w.starts;
-        case "cps":
-          return w.cps ?? Number.POSITIVE_INFINITY;
-        case "remaining":
-          return a.remaining;
-        case "buyers":
-          return a.buyers ?? -1;
-        case "newest":
-          return a.created_date;
-        default:
-          return w.spent;
-      }
-    };
-    return [...list].sort((a, b) => (sort === "cps" ? val(a) - val(b) : val(b) - val(a)));
-  }, [data, q, status, sort, win, tagFilter, textId, textVariant]);
+  const rows = useMemo(
+    () => sortRows((data?.ads ?? []).filter((a) => matches(a, f, variantText)), f.sort, f.dir),
+    [data, f, variantText],
+  );
   const visibleIds = useMemo(() => rows.map((a) => a.ad_id), [rows]);
   const chosen = useMemo(() => (data?.ads ?? []).filter((a) => selected.has(a.ad_id)), [data, selected]);
+  const shownColumns = COLUMNS.filter((c) => columns.includes(c.id));
 
-  // Links from other pages: /ads?tag=none&select=all&bulk=referral selects every result and opens the dialog.
+  // Links from other pages (?referral=without&select=all&bulk=referral) select every result and open the dialog.
   useEffect(() => {
-    if (autoOpened.current || !data || !visibleIds.length) return;
-    if (params.get("select") === "all") {
-      autoOpened.current = true;
-      setSelected(new Set(visibleIds));
-      const k = params.get("bulk");
-      if (k === "referral" || k === "content") setBulk(k);
-    }
+    if (autoOpened.current || !data || !visibleIds.length || params.get("select") !== "all") return;
+    autoOpened.current = true;
+    setSelected(new Set(visibleIds));
+    const k = params.get("bulk");
+    if (k === "referral" || k === "content") setBulk(k);
   }, [data, visibleIds, params]);
 
-  const counts = useMemo(() => {
-    const all = data?.ads ?? [];
-    return {
-      all: all.length,
-      running: all.filter((a) => matchStatus(a, "running")).length,
-      review: all.filter((a) => matchStatus(a, "review")).length,
-      stopped: all.filter((a) => matchStatus(a, "stopped")).length,
-      declined: all.filter((a) => matchStatus(a, "declined")).length,
-      archived: data?.archived_count ?? 0,
-    };
-  }, [data]);
+  const toggleColumn = (id: ColumnId) => {
+    const next = columns.includes(id) ? columns.filter((c) => c !== id) : [...columns, id];
+    setColumns(next);
+    saveColumns(next);
+  };
+  const sortBy = (id: string) =>
+    set(f.sort === id ? { dir: f.dir === "desc" ? "asc" : "desc" } : { sort: id, dir: id === "ad" ? "asc" : "desc" });
+  const filterCount = activeFilterCount(f);
 
   return (
-    <div className="space-y-4">
-      <PageHeader
-        title="آگهی‌ها"
-        description="همه‌ی آگهی‌های این حساب با آمار، برچسب رفرال و فروش هر کدام."
-        actions={
-          <Button asChild>
-            <Link to="new">
-              <PlusIcon /> آگهی جدید
-            </Link>
-          </Button>
-        }
-      />
-
-      <div className="flex flex-col gap-3">
-        <Tabs value={status} onValueChange={(v) => set("status", v === "all" ? "" : v)}>
-          <TabsList className="w-full justify-start sm:w-fit">
-            {(
-              [
-                ["all", "همه"],
-                ["running", "فعال"],
-                ["review", "در بررسی"],
-                ["stopped", "متوقف"],
-                ["declined", "رد شده"],
-                ["archived", "بایگانی‌شده"],
-              ] as const
-            ).map(([k, label]) => (
-              <TabsTrigger key={k} value={k} className="flex-none">
-                {label}{" "}
-                {(!archived || k === "archived") && (
-                  <span className="num text-xs text-muted-foreground">{num(counts[k])}</span>
-                )}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative min-w-0 flex-1 basis-56">
-            <SearchIcon className="pointer-events-none absolute start-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="جستجو در متن، جایگاه، برچسب یا شماره…"
-              className="ps-8"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </div>
-          <Select value={win} onValueChange={(v) => set("w", v === "7" ? "" : v)}>
-            <SelectTrigger className="w-36" aria-label="بازه">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="7">۷ روز اخیر</SelectItem>
-              <SelectItem value="28">۲۸ روز اخیر</SelectItem>
-              <SelectItem value="all">کل عمر آگهی</SelectItem>
-              <SelectItem value="since">از تاریخ…</SelectItem>
-            </SelectContent>
-          </Select>
-          {win === "since" && (
-            <Input
-              type="date"
-              dir="ltr"
-              className="w-40"
-              value={since}
-              onChange={(e) => set("since", e.target.value)}
-              aria-label="از تاریخ"
-            />
-          )}
-          <Select value={tagFilter || "all"} onValueChange={(v) => set("tag", v === "all" ? "" : v)}>
-            <SelectTrigger className="w-40" aria-label="برچسب">
-              <TagIcon />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">همه‌ی برچسب‌ها</SelectItem>
-              <SelectItem value="none">بدون برچسب رفرال</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={sort} onValueChange={(v) => set("sort", v === "spent" ? "" : v)}>
-            <SelectTrigger className="w-40" aria-label="مرتب‌سازی">
-              <ArrowDownWideNarrowIcon />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="spent">بیشترین خرج</SelectItem>
-              <SelectItem value="starts">بیشترین استارت</SelectItem>
-              <SelectItem value="cps">ارزان‌ترین استارت</SelectItem>
-              <SelectItem value="buyers">بیشترین خریدار</SelectItem>
-              <SelectItem value="remaining">بیشترین بودجه</SelectItem>
-              <SelectItem value="newest">جدیدترین</SelectItem>
-            </SelectContent>
-          </Select>
+    <div dir="ltr" lang="en" className="space-y-4 text-left" data-testid="ads-list">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Ads</h1>
+          <p className="text-sm text-muted-foreground">All ads of this account with statistics, referral tags and sales.</p>
         </div>
+        <Button asChild>
+          <Link to="new">
+            <PlusIcon /> New Ad
+          </Link>
+        </Button>
       </div>
 
-      {textId && (
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <Badge variant="info">آگهی‌های متن «{textVariant?.name ?? textId}»</Badge>
-          <Button size="sm" variant="ghost" onClick={() => set("text_id", "")}>
-            <XIcon /> برداشتن فیلتر
-          </Button>
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-0 flex-1 basis-56">
+          <SearchIcon className="pointer-events-none absolute start-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search title, text, target or ad ID"
+            className="ps-8"
+            value={f.q}
+            onChange={(e) => set({ q: e.target.value })}
+            aria-label="Search"
+          />
         </div>
-      )}
-      {rows.length > 0 && !archived && (
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <Button size="sm" variant="outline" onClick={() => setSelected(new Set(visibleIds))}>
-            <ListChecksIcon /> انتخاب همه‌ی نتایج فیلتر ({num(visibleIds.length)})
-          </Button>
-          {selected.size > 0 && (
-            <span className="text-xs text-muted-foreground">
-              <span className="num">{num(selected.size)}</span> آگهی انتخاب شده
-            </span>
-          )}
+        <Select dir="ltr" value={f.period} onValueChange={(v) => set({ period: v as PeriodKey })}>
+          <SelectTrigger className="w-40" aria-label="Period">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent dir="ltr">
+            {(Object.keys(PERIOD_LABEL) as PeriodKey[]).map((k) => (
+              <SelectItem key={k} value={k}>
+                {PERIOD_LABEL[k]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {f.period === "custom" && (
+          <div className="flex items-center gap-1">
+            <Input type="date" className="w-36" value={f.from} onChange={(e) => set({ from: e.target.value })} aria-label="From" />
+            <span className="text-muted-foreground">–</span>
+            <Input type="date" className="w-36" value={f.to} onChange={(e) => set({ to: e.target.value })} aria-label="To" />
+          </div>
+        )}
+        <div className="hidden items-center gap-2 md:flex">
+          <StatusMenu value={f.status} onChange={(status) => set({ status })} />
+          <Select dir="ltr" value={f.placement || "all"} onValueChange={(v) => set({ placement: v === "all" ? "" : (v as Filters["placement"]) })}>
+            <SelectTrigger className="w-36" aria-label="Placement">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent dir="ltr">
+              <SelectItem value="all">All placements</SelectItem>
+              <SelectItem value="channels">Channels</SelectItem>
+              <SelectItem value="bots">Bots</SelectItem>
+              <SelectItem value="search">Search</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
-      )}
+        <FiltersSheet f={f} set={set} texts={texts.data ?? []} count={filterCount} />
+        <DropdownMenu dir="ltr">
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" aria-label="Columns">
+              <ColumnsIcon /> <span className="hidden sm:inline">Columns</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <div dir="ltr">
+            <DropdownMenuLabel>Telegram Ads</DropdownMenuLabel>
+            {COLUMNS.filter((c) => !c.extra).map((c) => (
+              <DropdownMenuCheckboxItem key={c.id} checked={columns.includes(c.id)} onCheckedChange={() => toggleColumn(c.id)} onSelect={(e) => e.preventDefault()}>
+                {c.label}
+              </DropdownMenuCheckboxItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>This panel</DropdownMenuLabel>
+            {COLUMNS.filter((c) => c.extra).map((c) => (
+              <DropdownMenuCheckboxItem key={c.id} checked={columns.includes(c.id)} onCheckedChange={() => toggleColumn(c.id)} onSelect={(e) => e.preventDefault()}>
+                {c.label}
+              </DropdownMenuCheckboxItem>
+            ))}
+            </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-muted-foreground" data-testid="result-count">
+          {enNum(rows.length)} {rows.length === 1 ? "ad" : "ads"}
+          {data && rows.length !== data.ads.length ? ` of ${enNum(data.ads.length)}` : ""}
+          {data?.period ? ` · ${PERIOD_LABEL[(data.period.preset as PeriodKey) ?? "7d"] ?? data.period.preset}` : ""}
+          {data?.period?.preset === "today" ? " (since 00:00 local time)" : ""}
+        </span>
+        {filterCount > 0 && (
+          <Button size="sm" variant="ghost" onClick={() => set(RESET_PATCH)}>
+            <RotateCcwIcon /> Reset filters
+          </Button>
+        )}
+        {!f.archived && (data?.archived_count ?? 0) > 0 && (
+          <Button size="sm" variant="ghost" onClick={() => set({ archived: true })}>
+            <ArchiveIcon /> Archived ({enNum(data?.archived_count)})
+          </Button>
+        )}
+        {f.archived && (
+          <Badge variant="secondary">
+            <ArchiveIcon /> Showing archived ads
+          </Badge>
+        )}
+        {rows.length > 0 && !f.archived && (
+          <Button size="sm" variant="outline" className="ms-auto" onClick={() => setSelected(new Set(visibleIds))}>
+            <ListChecksIcon /> Select all {enNum(visibleIds.length)} results
+          </Button>
+        )}
+      </div>
+
       {error && <QueryError error={error} retry={() => refetch()} />}
       {isLoading && <Skeleton className="h-96" />}
       {!isLoading && !error && rows.length === 0 && (
         <EmptyState
           icon={MegaphoneIcon}
-          title={data?.ads.length ? "آگهی‌ای با این فیلتر نیست" : "هنوز آگهی‌ای خوانده نشده"}
-          description={data?.ads.length ? undefined : "بعد از اولین همگام‌سازی، آگهی‌های حساب اینجا می‌آیند."}
+          title={data?.ads.length ? "No ads match these filters" : "No ads yet"}
+          description={data?.ads.length ? undefined : "Ads appear here after the first sync."}
         />
       )}
 
       {rows.length > 0 && (
         <>
-          {/* Desktop table */}
           <Card className="hidden py-0 md:flex">
             <Table>
               <TableHeader>
                 <TableRow>
-                  {!archived && (
+                  {!f.archived && (
                     <TableHead className="w-8">
                       <Checkbox
-                        aria-label="انتخاب همه"
+                        aria-label="Select all"
                         checked={headerState(selected, visibleIds)}
                         onCheckedChange={() => setSelected((x) => toggleAll(x, visibleIds))}
                       />
                     </TableHead>
                   )}
-                  <TableHead>آگهی</TableHead>
-                  <TableHead>وضعیت</TableHead>
-                  <TableHead className="text-end">خرج</TableHead>
-                  <TableHead className="text-end">استارت</TableHead>
-                  <TableHead className="text-end">هر استارت</TableHead>
-                  <TableHead className="text-end">CTR</TableHead>
-                  <TableHead className="text-end">خریدار</TableHead>
-                  <TableHead className="text-end">بودجه</TableHead>
+                  <SortHead id="ad" label="Ad" f={f} onSort={sortBy} />
+                  {shownColumns.map((c) => (
+                    <SortHead key={c.id} id={c.id} label={c.label} f={f} onSort={sortBy} numeric={c.numeric && c.id !== "added"} />
+                  ))}
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((a) => {
-                  const w = windowed(a, win);
-                  return (
-                    <TableRow
-                      key={a.ad_id}
-                      className="cursor-pointer"
-                      data-state={selected.has(a.ad_id) ? "selected" : undefined}
-                      onClick={(e) => {
-                        if ((e.target as HTMLElement).closest("button,a,[role=menuitem],[role=checkbox]")) return;
-                        nav(String(a.ad_id));
-                      }}
-                    >
-                      {!archived && (
-                        <TableCell>
-                          <Checkbox
-                            aria-label={`انتخاب آگهی ${a.ad_id}`}
-                            checked={selected.has(a.ad_id)}
-                            onCheckedChange={() => setSelected((x) => toggleOne(x, a.ad_id))}
-                          />
-                        </TableCell>
-                      )}
-                      <TableCell className="max-w-[22rem] whitespace-normal">
-                        <div className="flex items-center gap-1.5">
-                          <Link to={String(a.ad_id)} className="truncate font-medium hover:underline">
-                            {a.target_label || a.title || `#${a.ad_id}`}
-                          </Link>
-                          <Badge variant="outline" className="shrink-0 text-[10px]">
-                            {placementLabel(a.placement)}
-                          </Badge>
-                        </div>
-                        <div className="line-clamp-1 text-xs text-muted-foreground wrap-anywhere">{a.text}</div>
-                        {a.tag_name && (
-                          <div className="mt-0.5 flex items-center gap-1 text-[11px] text-info">
-                            <TagIcon className="size-3" /> {a.tag_name}
-                            {a.tag_shared && <span className="text-muted-foreground">(مشترک)</span>}
-                          </div>
-                        )}
-                      </TableCell>
+                {rows.map((a) => (
+                  <TableRow
+                    key={a.ad_id}
+                    className="cursor-pointer"
+                    data-state={selected.has(a.ad_id) ? "selected" : undefined}
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest("button,a,[role=menuitem],[role=checkbox]")) return;
+                      nav(String(a.ad_id));
+                    }}
+                  >
+                    {!f.archived && (
                       <TableCell>
-                        <div className="flex flex-col items-start gap-1">
-                          <AdStatusBadge status={a.status} paused={a.is_paused} />
-                          {budgetless(a) && !archived && (
-                            <Badge variant="warning" className="text-[10px]">
-                              <WalletIcon /> {budgetless(a)}
-                            </Badge>
-                          )}
-                          {a.archived && (
-                            <Badge variant="secondary" className="text-[10px]">
-                              <ArchiveIcon /> بایگانی
-                            </Badge>
-                          )}
-                        </div>
+                        <Checkbox
+                          aria-label={`Select ad ${a.ad_id}`}
+                          checked={selected.has(a.ad_id)}
+                          onCheckedChange={() => setSelected((x) => toggleOne(x, a.ad_id))}
+                        />
                       </TableCell>
-                      <TableCell className="num text-end">{money(w.spent, cur)}</TableCell>
-                      <TableCell className="num text-end">{num(w.starts)}</TableCell>
-                      <TableCell
-                        className={cn("num text-end", w.cps != null && w.cps > stopCps && a.has_stats && "text-destructive")}
-                      >
-                        {money(w.cps, cur)}
+                    )}
+                    <TableCell className="max-w-[20rem] min-w-[14rem] whitespace-normal">
+                      <div className="flex items-center gap-1.5">
+                        <Link to={String(a.ad_id)} className="truncate font-medium hover:underline">
+                          {a.title || a.target_label || `#${a.ad_id}`}
+                        </Link>
+                        <Badge variant="outline" className="shrink-0 text-[10px]">
+                          {PLACEMENT_LABEL[placementKey(a)]}
+                        </Badge>
+                      </div>
+                      <div dir="auto" className="line-clamp-1 text-xs text-muted-foreground wrap-anywhere">
+                        {a.text}
+                      </div>
+                    </TableCell>
+                    {shownColumns.map((c) => (
+                      <TableCell key={c.id} className={cn(c.numeric && c.id !== "added" && "text-right tabular-nums", "whitespace-nowrap")}>
+                        <Cell id={c.id} a={a} cur={cur} />
                       </TableCell>
-                      <TableCell className="num text-end">{pct(w.views ? w.clicks / w.views : null)}</TableCell>
-                      <TableCell className="num text-end">{a.buyers == null ? "—" : num(a.buyers)}</TableCell>
-                      <TableCell className="num text-end">{money(a.remaining, cur)}</TableCell>
-                      <TableCell>
+                    ))}
+                    <TableCell>
+                      <div dir="rtl">
                         <AdActions account={account} ad={a} compact />
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           </Card>
 
-          {/* Mobile cards */}
           <div className="grid gap-2 md:hidden">
             {rows.map((a) => {
-              const w = windowed(a, win);
+              const n = periodNumbers(a);
               return (
                 <Card key={a.ad_id} className={cn("gap-3 px-4 py-3", selected.has(a.ad_id) && "border-primary")}>
                   <div className="flex items-start gap-2">
-                    {!archived && (
+                    {!f.archived && (
                       <Checkbox
                         className="mt-1"
-                        aria-label={`انتخاب آگهی ${a.ad_id}`}
+                        aria-label={`Select ad ${a.ad_id}`}
                         checked={selected.has(a.ad_id)}
                         onCheckedChange={() => setSelected((x) => toggleOne(x, a.ad_id))}
                       />
                     )}
                     <Link to={String(a.ad_id)} className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
-                        <span className="truncate font-medium">{a.target_label || a.title || `#${a.ad_id}`}</span>
+                        <span className="truncate font-medium">{a.title || a.target_label || `#${a.ad_id}`}</span>
                         <Badge variant="outline" className="shrink-0 text-[10px]">
-                          {placementLabel(a.placement)}
+                          {PLACEMENT_LABEL[placementKey(a)]}
                         </Badge>
                       </div>
-                      <div className="line-clamp-2 text-xs text-muted-foreground wrap-anywhere">{a.text}</div>
+                      <div dir="auto" className="line-clamp-2 text-xs text-muted-foreground wrap-anywhere">
+                        {a.text}
+                      </div>
                     </Link>
-                    <AdActions account={account} ad={a} compact />
+                    <div dir="rtl">
+                      <AdActions account={account} ad={a} compact />
+                    </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <AdStatusBadge status={a.status} paused={a.is_paused} />
-                    {budgetless(a) && !archived && (
-                      <Badge variant="warning">
-                        <WalletIcon /> {budgetless(a)}
-                      </Badge>
-                    )}
+                    <StatusBadge a={a} />
+                    {a.remaining <= 0.01 && <Badge variant="warning">Out of budget{a.empty_days != null ? ` · ${a.empty_days}d` : ""}</Badge>}
                     {a.tag_name && (
                       <Badge variant="info" className="max-w-full">
                         <TagIcon /> <span className="truncate">{a.tag_name}</span>
@@ -411,14 +360,10 @@ export default function AdsPage() {
                     )}
                   </div>
                   <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                    <MiniStat label={`خرج ${currencyLabel(cur)}`} value={money(w.spent)} />
-                    <MiniStat label="استارت" value={num(w.starts)} />
-                    <MiniStat
-                      label="هر استارت"
-                      value={money(w.cps)}
-                      bad={w.cps != null && w.cps > stopCps && a.has_stats}
-                    />
-                    <MiniStat label={`بودجه ${currencyLabel(cur)}`} value={money(a.remaining)} />
+                    <Mini label="Spent" value={enMoney(n.spent)} />
+                    <Mini label="Actions" value={enNum(n.actions)} />
+                    <Mini label="CPA" value={enMoney(n.actions ? n.spent / n.actions : null)} />
+                    <Mini label={`Budget ${cur}`} value={enMoney(a.remaining)} />
                   </div>
                 </Card>
               );
@@ -427,26 +372,25 @@ export default function AdsPage() {
         </>
       )}
 
-      {selected.size > 0 && !archived && (
+      {selected.size > 0 && !f.archived && (
         <>
           <div className="h-20 md:hidden" aria-hidden />
           <div
             role="toolbar"
-            aria-label="اقدام گروهی"
+            aria-label="Bulk actions"
+            dir="ltr"
             className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 shadow-lg backdrop-blur md:sticky md:bottom-4 md:mx-auto md:max-w-3xl md:rounded-xl md:border"
           >
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-medium">
-                <span className="num">{num(selected.size)}</span> آگهی
-              </span>
+              <span className="text-sm font-medium tabular-nums">{enNum(selected.size)} selected</span>
               <div className="ms-auto flex flex-wrap gap-2">
                 <Button size="sm" onClick={() => setBulk("content")}>
-                  <PencilLineIcon /> متن/عکس
+                  <PencilLineIcon /> Text / Photo
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => setBulk("referral")}>
-                  <LinkIcon /> لینک رفرال
+                  <LinkIcon /> Referral link
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} aria-label="پاک کردن انتخاب">
+                <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} aria-label="Clear selection">
                   <XIcon />
                 </Button>
               </div>
@@ -455,22 +399,297 @@ export default function AdsPage() {
         </>
       )}
       {bulk && chosen.length > 0 && (
-        <BulkDialog
-          account={account}
-          kind={bulk}
-          targets={chosen.map((a) => ({ ad_id: a.ad_id, label: a.target_label || a.title || `#${a.ad_id}`, text: a.text }))}
-          onClose={() => setBulk(null)}
-        />
+        <div dir="rtl" lang="fa">
+          <BulkDialog
+            account={account}
+            kind={bulk}
+            targets={chosen.map((a) => ({
+              ad_id: a.ad_id,
+              label: a.target_label || a.title || `#${a.ad_id}`,
+              text: a.text,
+              placement: a.placement,
+              target_type: a.target_type,
+            }))}
+            onClose={() => setBulk(null)}
+          />
+        </div>
       )}
     </div>
   );
 }
 
-function MiniStat({ label, value, bad }: { label: string; value: string; bad?: boolean }) {
+function StatusBadge({ a }: { a: AdRow }) {
+  const k = statusKey(a);
+  return <Badge variant={STATUS_VARIANT[k]}>{STATUS_LABEL[k]}</Badge>;
+}
+
+function Cell({ id, a, cur }: { id: ColumnId; a: AdRow; cur: string }) {
+  const n = periodNumbers(a);
+  switch (id) {
+    case "status":
+      return <StatusBadge a={a} />;
+    case "cpm":
+      return <>{enMoney(a.cpm, cur)}</>;
+    case "views":
+      return <>{enNum(n.views)}</>;
+    case "clicks":
+      return <>{enNum(n.clicks)}</>;
+    case "actions":
+      return <>{enNum(n.actions)}</>;
+    case "ctr":
+      return <>{enPct(n.views ? n.clicks / n.views : null)}</>;
+    case "cvr":
+      return <>{enPct(n.clicks ? n.actions / n.clicks : null)}</>;
+    case "cpc":
+      return <>{enMoney(n.clicks ? n.spent / n.clicks : null, cur)}</>;
+    case "cpa":
+      return <>{enMoney(n.actions ? n.spent / n.actions : null, cur)}</>;
+    case "spent":
+      return <>{enMoney(n.spent, cur)}</>;
+    case "budget":
+      return <>{enMoney(a.remaining, cur)}</>;
+    case "target":
+      return <span className="inline-block max-w-[12rem] truncate align-bottom">{a.target_label || "—"}</span>;
+    case "added":
+      return <>{enDate(a.created_date)}</>;
+    case "buyers":
+      return <>{a.buyers == null ? "—" : enNum(a.buyers)}</>;
+    case "cpp":
+      return <>{enMoney(a.cpp, cur)}</>;
+    case "referral":
+      return a.tag_name ? (
+        <span className="inline-flex max-w-[10rem] items-center gap-1 text-info">
+          <TagIcon className="size-3 shrink-0" />
+          <span className="truncate">{a.tag_name}</span>
+          {a.tag_shared && <span className="text-muted-foreground">(shared)</span>}
+        </span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      );
+    case "empty":
+      return a.remaining > 0.01 ? (
+        <span className="text-muted-foreground">—</span>
+      ) : (
+        <span className="text-warning">{a.empty_days == null ? "Out of budget" : `${a.empty_days} ${a.empty_days === 1 ? "day" : "days"}`}</span>
+      );
+  }
+}
+
+function SortHead({
+  id,
+  label,
+  f,
+  onSort,
+  numeric,
+}: {
+  id: string;
+  label: string;
+  f: Filters;
+  onSort: (id: string) => void;
+  numeric?: boolean;
+}) {
+  const active = f.sort === id;
+  const Icon = !active ? ArrowUpDownIcon : f.dir === "asc" ? ArrowUpIcon : ArrowDownIcon;
+  return (
+    <TableHead className={cn(numeric && "text-right")} aria-sort={active ? (f.dir === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        onClick={() => onSort(id)}
+        className={cn("inline-flex items-center gap-1 whitespace-nowrap hover:text-foreground", active && "text-foreground")}
+      >
+        {label}
+        <Icon className={cn("size-3", !active && "opacity-40")} />
+      </button>
+    </TableHead>
+  );
+}
+
+function StatusMenu({ value, onChange }: { value: Filters["status"]; onChange: (v: Filters["status"]) => void }) {
+  return (
+    <DropdownMenu dir="ltr">
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" aria-label="Status">
+          Status{value.length ? ` (${value.length})` : ""}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent>
+        <div dir="ltr">
+        {STATUS_KEYS.map((k) => (
+          <DropdownMenuCheckboxItem
+            key={k}
+            checked={value.includes(k)}
+            onSelect={(e) => e.preventDefault()}
+            onCheckedChange={(on) => onChange(on ? [...value, k] : value.filter((x) => x !== k))}
+          >
+            {STATUS_LABEL[k]}
+          </DropdownMenuCheckboxItem>
+        ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function FiltersSheet({
+  f,
+  set,
+  texts,
+  count,
+}: {
+  f: Filters;
+  set: (p: Partial<Filters>) => void;
+  texts: TextVariant[];
+  count: number;
+}) {
+  return (
+    <Sheet>
+      <SheetTrigger asChild>
+        <Button variant="outline" aria-label="Filters">
+          <SlidersHorizontalIcon /> Filters{count ? ` (${count})` : ""}
+        </Button>
+      </SheetTrigger>
+      <SheetContent side="end" dir="ltr" lang="en" className="w-[90%] max-w-sm overflow-y-auto p-5 text-left">
+        <SheetHeader className="space-y-1">
+          <SheetTitle>Filters</SheetTitle>
+          <SheetDescription>All filters combine and are kept in the page address.</SheetDescription>
+        </SheetHeader>
+        <div className="grid gap-4 text-sm">
+          <div className="grid gap-1.5">
+            <Label>Status</Label>
+            <div className="flex flex-wrap gap-1.5">
+              {STATUS_KEYS.map((k) => {
+                const on = f.status.includes(k);
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => set({ status: on ? f.status.filter((x) => x !== k) : [...f.status, k] })}
+                    className={cn("rounded-md border px-2 py-1 text-xs", on && "border-primary bg-accent text-accent-foreground")}
+                  >
+                    {STATUS_LABEL[k]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <Choice
+            label="Placement"
+            value={f.placement}
+            options={[["", "All"], ["channels", "Channels"], ["bots", "Bots"], ["search", "Search"]]}
+            onChange={(v) => set({ placement: v as Filters["placement"] })}
+          />
+          <Range label="CPM" min={f.cpmMin} max={f.cpmMax} onChange={(cpmMin, cpmMax) => set({ cpmMin, cpmMax })} />
+          <Range label="Budget" min={f.budgetMin} max={f.budgetMax} onChange={(budgetMin, budgetMax) => set({ budgetMin, budgetMax })} />
+          <Choice
+            label="Budget left"
+            value={f.budget}
+            options={[["", "Any"], ["has", "Has budget"], ["out", "Out of budget"]]}
+            onChange={(v) => set({ budget: v as Filters["budget"] })}
+          />
+          <Choice
+            label="Target type"
+            value={f.target}
+            options={[["", "Any"], ["channel", "Channel"], ["bot", "Bot"]]}
+            onChange={(v) => set({ target: v as Filters["target"] })}
+          />
+          <Choice
+            label="Referral link"
+            value={f.referral}
+            options={[["", "Any"], ["with", "With referral"], ["without", "Without referral"]]}
+            onChange={(v) => set({ referral: v as Filters["referral"] })}
+          />
+          <div className="grid gap-1.5">
+            <Label htmlFor="flt-variant">Text variant</Label>
+            <Select dir="ltr" value={f.variant || "all"} onValueChange={(v) => set({ variant: v === "all" ? "" : v })}>
+              <SelectTrigger id="flt-variant" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent dir="ltr">
+                <SelectItem value="all">Any text</SelectItem>
+                {texts.map((t) => (
+                  <SelectItem key={t.id} value={String(t.id)}>
+                    <span dir="auto">{t.name}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="flt-photo">Has photo</Label>
+            <Switch id="flt-photo" checked={f.photo} onCheckedChange={(photo) => set({ photo })} />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>Date added</Label>
+            <div className="flex items-center gap-1">
+              <Input type="date" value={f.addedFrom} onChange={(e) => set({ addedFrom: e.target.value })} aria-label="Added from" />
+              <span className="text-muted-foreground">–</span>
+              <Input type="date" value={f.addedTo} onChange={(e) => set({ addedTo: e.target.value })} aria-label="Added to" />
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="flt-archived">Show archived ads</Label>
+            <Switch id="flt-archived" checked={f.archived} onCheckedChange={(archived) => set({ archived })} />
+          </div>
+          <Button variant="outline" onClick={() => set(RESET_PATCH)}>
+            <RotateCcwIcon /> Reset filters
+          </Button>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function Choice({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: [string, string][];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="grid gap-1.5" role="radiogroup" aria-label={label}>
+      <Label>{label}</Label>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map(([v, l]) => (
+          <button
+            key={v || "any"}
+            type="button"
+            role="radio"
+            aria-checked={value === v}
+            onClick={() => onChange(v)}
+            className={cn("rounded-md border px-2 py-1 text-xs", value === v && "border-primary bg-accent text-accent-foreground")}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Range({ label, min, max, onChange }: { label: string; min: string; max: string; onChange: (min: string, max: string) => void }) {
+  return (
+    <div className="grid gap-1.5">
+      <Label>{label}</Label>
+      <div className="flex items-center gap-1">
+        <Input type="number" inputMode="decimal" step="0.01" placeholder="Min" value={min} onChange={(e) => onChange(e.target.value, max)} aria-label={`${label} min`} />
+        <span className="text-muted-foreground">–</span>
+        <Input type="number" inputMode="decimal" step="0.01" placeholder="Max" value={max} onChange={(e) => onChange(min, e.target.value)} aria-label={`${label} max`} />
+      </div>
+    </div>
+  );
+}
+
+function Mini({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md bg-muted/50 px-1 py-1.5">
-      <div className={cn("num truncate font-semibold", bad && "text-destructive")}>{value}</div>
-      <div className="text-muted-foreground">{label}</div>
+      <div className="truncate font-semibold tabular-nums">{value}</div>
+      <div className="truncate text-muted-foreground">{label}</div>
     </div>
   );
 }

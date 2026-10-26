@@ -26,12 +26,20 @@ JOB_LABEL = {
     "resume": "فعال‌سازی",
     "withdraw": "برداشت بودجه",
     "topup": "شارژ",
+    "transfer": "انتقال بودجه",
     "create_ad": "ساخت آگهی جایگزین",
     "edit_ad": "ویرایش آگهی",
     "delete_ad": "حذف آگهی",
 }
 # Errors that will not change on a retry: the item fails at once instead of four attempts.
-FINAL_ERRORS = ("NOT_ENOUGH_BUDGET", "AD_TEXT_TOO_LONG", "CHANNEL_INVALID", "BOT_INVALID", "AD_ID_INVALID")
+FINAL_ERRORS = (
+    "NOT_ENOUGH_BUDGET",
+    "BUDGET_TOO_LOW",
+    "AD_TEXT_TOO_LONG",
+    "CHANNEL_INVALID",
+    "BOT_INVALID",
+    "AD_ID_INVALID",
+)
 
 
 def enqueue(
@@ -99,9 +107,38 @@ async def topups_last_24h(s: AsyncSession, acc: Account) -> float:
         await s.execute(
             select(func.sum(Job.amount)).where(
                 Job.account_id == acc.id,
-                Job.kind.in_(("topup", "create_ad")),  # initial budgets of bulk replacements count too
+                # Only new money put on ads. Moving a withdrawn budget to a replacement ("transfer") adds
+                # nothing; initial budgets of replacements have their own cap (new_budget_last_24h).
+                Job.kind == "topup",
                 Job.status.in_(("queued", "running", "done")),
                 Job.created_ts >= now_ts() - 86400,
+            )
+        )
+    ).scalar_one()
+    return float(r or 0)
+
+
+async def new_budget_last_24h(s: AsyncSession, acc: Account) -> float:
+    """Initial budgets of ads created by bulk replacements in the last 24 h (bulk_daily_new_budget_cap)."""
+    r = (
+        await s.execute(
+            select(func.sum(Job.amount)).where(
+                Job.account_id == acc.id,
+                Job.kind == "create_ad",
+                Job.status.in_(("queued", "running", "done")),
+                Job.created_ts >= now_ts() - 86400,
+            )
+        )
+    ).scalar_one()
+    return float(r or 0)
+
+
+async def reserved_new_budget(s: AsyncSession, acc: Account) -> float:
+    """Initial budgets of replacements queued but not created yet: already spoken for in the balance."""
+    r = (
+        await s.execute(
+            select(func.sum(Job.amount)).where(
+                Job.account_id == acc.id, Job.kind == "create_ad", Job.status.in_(("queued", "running"))
             )
         )
     ).scalar_one()
@@ -294,6 +331,16 @@ async def _refresh_ad(c: TelegramAdsClient, account_id: int, ad_id: int, kind: s
     return ad
 
 
+async def _store_balance(c: TelegramAdsClient, account_id: int) -> None:
+    """Keep the stored account balance current after a job moved money (bulk waves plan with it)."""
+    acct = await c.account()
+    async with session_scope() as s:
+        a = await s.get(Account, account_id)
+        if a is not None:
+            a.remaining_budget = float(acct.get("remaining_budget") or 0)
+            a.ads_budget = float(acct.get("ads_budget") or a.ads_budget)
+
+
 async def run_job(job: Job, c: TelegramAdsClient) -> None:
     kind, aid = job.kind, job.ad_id
     if kind in ("pause", "resume"):
@@ -314,8 +361,9 @@ async def run_job(job: Job, c: TelegramAdsClient) -> None:
             return await _finish(job.id, "done", "بودجه‌ای برای برداشت نبود", {"done_amount": 0})
         await c.withdraw(aid, amount, key=job.idem_key)
         await _refresh_ad(c, job.account_id, aid, "withdraw")
+        await _store_balance(c, job.account_id)
         return await _finish(job.id, "done", f"{amount} به حساب برگشت", {"done_amount": amount})
-    if kind == "topup":
+    if kind in ("topup", "transfer"):
         acct = await c.account()
         amount = float(job.amount or 0)
         if float(acct.get("remaining_budget") or 0) + 1e-9 < amount:
@@ -339,6 +387,7 @@ async def run_job(job: Job, c: TelegramAdsClient) -> None:
             return await _finish(job.id, "failed", f"موجودی حساب ({acct.get('remaining_budget')}) کافی نیست")
         await c.topup(aid, amount, key=job.idem_key)
         await _refresh_ad(c, job.account_id, aid, "topup")
+        await _store_balance(c, job.account_id)
         return await _finish(job.id, "done", f"{amount} شارژ شد")
     if kind == "create_ad":
         return await _run_create(job, c)
@@ -362,10 +411,19 @@ async def _run_create(job: Job, c: TelegramAdsClient) -> None:
     params = dict(job.params or {})
     acct = await c.account()
     if float(acct.get("remaining_budget") or 0) + 1e-9 < float(params.get("initial_budget") or 0):
+        # Not this ad's fault: it goes back to the queue and is sent with the next wave.
+        async with session_scope() as s:
+            it = await s.get(BulkItem, job.bulk_item_id) if job.bulk_item_id else None
+            if it is not None and it.status == "submitted":
+                it.status, it.updated_ts = "pending", now_ts()
+            a = await s.get(Account, job.account_id)
+            if a is not None:
+                a.remaining_budget = float(acct.get("remaining_budget") or 0)
         return await _finish(
-            job.id, "failed", f"موجودی حساب ({acct.get('remaining_budget')}) برای بودجه‌ی اولیه کافی نیست"
+            job.id, "cancelled", f"موجودی حساب ({acct.get('remaining_budget')}) کافی نبود؛ آگهی به موج بعد رفت"
         )
     raw = await c.create_ad(job.idem_key, **params)
+    await _store_balance(c, job.account_id)
     async with session_scope() as s:
         it = await s.get(BulkItem, job.bulk_item_id) if job.bulk_item_id else None
         if it is not None:

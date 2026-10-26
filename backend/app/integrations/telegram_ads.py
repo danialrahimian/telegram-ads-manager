@@ -43,6 +43,12 @@ class TelegramAdsError(Exception):
     def friendly(self) -> str:
         if self.error in ERROR_HINTS:
             return ERROR_HINTS[self.error]
+        up = self.error.upper()
+        if "BUDGET" in up and any(x in up for x in ("LOW", "MIN", "SMALL", "TOO_FEW", "INVALID")):
+            return (
+                "تلگرام بودجه‌ی اولیه را کمتر از حداقل مجاز دانست (حداقل ۱ TON). "
+                "بودجه را بیشتر کنید یا «حداقل بودجه‌ی اولیه» را در تنظیمات حساب درست کنید."
+            )
         if "IP" in self.error.upper():
             return f"تلگرام درخواست را از این IP نپذیرفت ({self.error}). IP سرور را در Telegram Ads ← API ثبت کنید."
         if self.error.startswith("network"):

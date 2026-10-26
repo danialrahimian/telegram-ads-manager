@@ -16,6 +16,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 TOKENS = {"mocktoken-a": "a", "mocktoken-b": "b"}
+# Telegram refuses createAd with an initial budget under 1 TON; the exact error code is not documented,
+# so the mock answers BUDGET_TOO_LOW (the panel translates any budget-minimum error).
+MIN_INITIAL_BUDGET = 1.0
 
 # name, placement, cpm, days_running, starts_per_unit_early, starts_per_unit_late, daily_spend, quiet_days, remaining, start
 SCENARIOS_A = [
@@ -152,6 +155,48 @@ class TgAdsMock:
         with self.lock:
             self.accounts[key]["ads"][ad_id].update(fields)
 
+    def add_ads(self, key: str, n: int, placement: str = "channel_post", remaining: float = 1.0) -> list[int]:
+        """Append `n` simple active ads (with a week of stats) for tests that need many ads."""
+        with self.lock:
+            st = self.accounts[key]
+            today = datetime.now(UTC).date()
+            out = []
+            for _ in range(n):
+                st["next_id"] += 1
+                aid = st["next_id"]
+                tkey = "bots" if placement == "bot_banner" else "channels"
+                created = today - timedelta(days=7)
+                st["ads"][aid] = {
+                    "ad_id": aid,
+                    "title": f"bulk_{aid}",
+                    "text": "متن آزمایشی آگهی 👇",
+                    "promote_url": f"https://t.me/{BOT_USERNAME[key]}",
+                    "cpm": 0.4,
+                    "placement": placement,
+                    "status": "active",
+                    "views": 7000,
+                    "clicks": 200,
+                    "actions": 70,
+                    "action_type": "start_bot",
+                    "spent_budget": 0.35,
+                    "remaining_budget": remaining,
+                    "currency": "TON",
+                    "created_date": int(datetime.combine(created, datetime.min.time(), UTC).timestamp()),
+                    "target": {"type": tkey, tkey: [{"username": f"sample_bulk_{aid}", "title": f"bulk {aid}"}]},
+                }
+                st["stats"][aid] = [
+                    {
+                        "date": (created + timedelta(days=d)).isoformat(),
+                        "views": 1000,
+                        "clicks": 28,
+                        "actions": 10,
+                        "spent": 0.05,
+                    }
+                    for d in range(7)
+                ]
+                out.append(aid)
+            return out
+
     def set_balance(self, key: str, amount: float) -> None:
         with self.lock:
             self.accounts[key]["account"]["remaining_budget"] = amount
@@ -277,6 +322,8 @@ class TgAdsMock:
             return {"photo_id": "ph_" + str(len(files["file"])), "photo_url": "https://example.invalid/p.jpg"}
         if method == "createAd":
             budget = float(p.get("initial_budget") or 0)
+            if budget + 1e-9 < MIN_INITIAL_BUDGET:
+                raise KeyError("BUDGET_TOO_LOW")
             if budget > acct["remaining_budget"] + 1e-9:
                 raise KeyError("NOT_ENOUGH_BUDGET")
             if len(p["text"]) > 160:

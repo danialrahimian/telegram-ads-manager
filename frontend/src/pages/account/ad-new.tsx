@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorMessage } from "@/lib/api";
+import { supportsPhoto } from "@/lib/bulk";
 import { money, num } from "@/lib/format";
 import { accountApi, keys, useTags, useTexts } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -55,12 +56,22 @@ export default function AdNewPage() {
   }, [account.bot.username, tag]);
   const tooLong = text.length > 160;
   const maxBudget = st.topup_max_per_ad * 5;
+  const minBudget = st.min_initial_budget ?? 1;
+  const budgetError =
+    budget.trim() === ""
+      ? undefined
+      : Number(budget) < minBudget
+        ? `بودجه‌ی اولیه دست‌کم ${money(minBudget, account.telegram.currency)} است؛ تلگرام آگهی با بودجه‌ی کمتر نمی‌سازد.`
+        : Number(budget) > maxBudget
+          ? `حداکثر ${money(maxBudget)}`
+          : undefined;
+  const photoAllowed = supportsPhoto({ placement: kind === "channel" ? "channel_post" : "bot_banner" });
   const valid =
     /^@?[A-Za-z0-9_]{4,32}$/.test(username.trim()) &&
     text.trim().length > 0 &&
     !tooLong &&
     Number(cpm) > 0 &&
-    Number(budget) > 0 &&
+    Number(budget) >= minBudget &&
     Number(budget) <= maxBudget &&
     !!account.bot.username;
 
@@ -86,7 +97,7 @@ export default function AdNewPage() {
           replace_ad_id: replace ? Number(replace) : null,
         }),
       );
-      if (photo) fd.append("photo", photo);
+      if (photo && photoAllowed) fd.append("photo", photo);
       const res = await api.post<{ ad_id: number; message: string }>(`${accountApi(account.slug)}/ads`, fd);
       toast.success(res.message);
       await qc.invalidateQueries({ queryKey: keys.acc(account.slug) });
@@ -217,22 +228,28 @@ export default function AdNewPage() {
                 <span className="ltr">{url}</span>
               </div>
             )}
-            <Field label="عکس (اختیاری)" hint="JPG یا PNG، کمتر از ۵ مگابایت">
-              <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed px-3 py-2.5 text-sm text-muted-foreground hover:bg-muted/50">
-                <ImageIcon className="size-4" />
-                <span className="truncate">{photo ? photo.name : "انتخاب عکس"}</span>
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png"
-                  className="sr-only"
-                  onChange={(e) => setPhoto(e.target.files?.[0] ?? null)}
-                />
-              </label>
-            </Field>
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-sm">نمایش عکس پروفایل ربات</span>
-              <Switch checked={userpic} onCheckedChange={setUserpic} aria-label="نمایش عکس پروفایل" />
-            </div>
+            {photoAllowed ? (
+              <Field label="عکس (اختیاری)" hint="JPG یا PNG، کمتر از ۵ مگابایت">
+                <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed px-3 py-2.5 text-sm text-muted-foreground hover:bg-muted/50">
+                  <ImageIcon className="size-4" />
+                  <span className="truncate">{photo ? photo.name : "انتخاب عکس"}</span>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png"
+                    className="sr-only"
+                    onChange={(e) => setPhoto(e.target.files?.[0] ?? null)}
+                  />
+                </label>
+              </Field>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">آگهی ربات عکس ندارد؛ عکس فقط برای آگهی کانال است.</p>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm">نمایش عکس پروفایل ربات</span>
+                  <Switch checked={userpic} onCheckedChange={setUserpic} aria-label="نمایش عکس پروفایل" />
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -247,10 +264,19 @@ export default function AdNewPage() {
             <Field
               label="بودجه‌ی اولیه"
               htmlFor="budget"
-              error={Number(budget) > maxBudget ? `حداکثر ${money(maxBudget)}` : undefined}
+              error={budgetError}
               hint={`موجودی حساب: ${money(account.telegram.remaining_budget, account.telegram.currency)}`}
             >
-              <Input id="budget" type="number" step="0.01" min="0.01" dir="ltr" value={budget} onChange={(e) => setBudget(e.target.value)} />
+              <Input
+                id="budget"
+                type="number"
+                step="0.01"
+                min={minBudget}
+                dir="ltr"
+                value={budget}
+                onChange={(e) => setBudget(e.target.value)}
+                aria-invalid={!!budgetError}
+              />
             </Field>
             <Field label="عنوان داخلی (اختیاری)" htmlFor="title">
               <Input id="title" value={title} onChange={(e) => setTitle(e.target.value)} />
