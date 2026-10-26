@@ -254,8 +254,8 @@ def test_replace_proposal_for_a_declined_ad(page, stack: Stack, shot):
 def test_bulk_text_change_with_preview_then_archive(page, stack: Stack, shot):
     stack.set_balance("a", 0.05)
     _nav(page, "/accounts/psychonet/ads")
-    page.get_by_role("checkbox", name="Select ad 4").click()
-    page.get_by_role("checkbox", name="Select ad 5").click()
+    page.get_by_role("checkbox", name="Select ad 4", exact=True).click()
+    page.get_by_role("checkbox", name="Select ad 5", exact=True).click()
     bar = page.get_by_role("toolbar", name="Bulk actions")
     expect(bar.get_by_text("2 selected")).to_be_visible()
     bar.get_by_role("button", name="Text / Photo").click()
@@ -377,7 +377,7 @@ def test_replacement_waves_with_low_balance(page, stack: Stack, shot):
     stack.set_balance("a", 2.5)
     _nav(page, "/accounts/psychonet/ads")
     for ad_id in (6, 7, 8):
-        page.get_by_role("checkbox", name=f"Select ad {ad_id}").click()
+        page.get_by_role("checkbox", name=f"Select ad {ad_id}", exact=True).click()
     page.get_by_role("toolbar", name="Bulk actions").get_by_role("button", name="Text / Photo").click()
     dlg = page.get_by_role("dialog")
     dlg.get_by_label("متن تازه (خالی = متن فعلی بماند)").fill("سایکونت | VPN پایدار با تست رایگان 👇")
@@ -499,8 +499,8 @@ def test_random_tracking_test(page, stack: Stack, shot):
 
 def test_random_links_per_ad(page, stack: Stack, shot):
     _nav(page, "/accounts/darvaze/ads")
-    page.get_by_role("checkbox", name="Select ad 101").click()
-    page.get_by_role("checkbox", name="Select ad 102").click()
+    page.get_by_role("checkbox", name="Select ad 101", exact=True).click()
+    page.get_by_role("checkbox", name="Select ad 102", exact=True).click()
     page.get_by_role("toolbar", name="Bulk actions").get_by_role("button", name="Referral link").click()
     dlg = page.get_by_role("dialog")
     dlg.get_by_role("radio", name=re.compile("لینک رندوم اختصاصی برای هر آگهی")).click()
@@ -533,8 +533,8 @@ def test_random_links_per_ad(page, stack: Stack, shot):
 
 def test_one_shared_link(page, stack: Stack, shot):
     _nav(page, "/accounts/darvaze/ads")
-    page.get_by_role("checkbox", name="Select ad 102").click()
-    page.get_by_role("checkbox", name="Select ad 103").click()
+    page.get_by_role("checkbox", name="Select ad 102", exact=True).click()
+    page.get_by_role("checkbox", name="Select ad 103", exact=True).click()
     page.get_by_role("toolbar", name="Bulk actions").get_by_role("button", name="Referral link").click()
     dlg = page.get_by_role("dialog")
     dlg.get_by_role("radio", name=re.compile("یک لینک مشترک برای همه")).click()
@@ -684,7 +684,7 @@ def test_mobile_ads_cards_filters_and_bulk_bar(browser, ctx, stack: Stack, shot)
     )
     p = mctx.new_page()
     p.goto("/accounts/psychonet/ads")
-    expect(p.get_by_role("checkbox", name="Select ad 1")).to_be_visible()
+    expect(p.get_by_role("checkbox", name="Select ad 1", exact=True)).to_be_visible()
     expect(p.locator("table")).to_be_hidden()  # cards, not a table
     p.get_by_role("button", name="Filters", exact=True).click()
     sheet = p.get_by_role("dialog")
