@@ -766,14 +766,14 @@ def _create_params(op: BulkOperation, it: BulkItem, ad: Ad) -> dict[str, Any] | 
     tgt = create_target(ad)
     if tgt is None:
         return None
-    target, placement = tgt
+    target, slot = tgt
     title = re.sub(r"\s+", " ", f"{ad.title or ad.target_label or ad.ad_id}")[:100] + f" r{op.id}"
     params: dict[str, Any] = {
         "title": title[:120],
         "text": it.params.get("text") or ad.text,
         "promote_url": it.params.get("promote_url") or ad.promote_url,
         "cpm": ad.cpm,
-        "placement": placement,
+        "placement": slot,
         "target": target,
         "initial_budget": float(it.params.get("initial_budget") or 0),
         "return_target": True,
