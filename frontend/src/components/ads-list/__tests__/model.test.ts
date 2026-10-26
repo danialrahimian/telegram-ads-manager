@@ -10,6 +10,7 @@ import {
   writeFilters,
 } from "@/components/ads-list/model";
 import { supportsPhoto } from "@/lib/bulk";
+import { faDigits } from "@/lib/format";
 import { enDate, enMoney, enNum, enPct } from "@/lib/format-en";
 import type { AdRow } from "@/lib/types";
 
@@ -118,5 +119,13 @@ describe("ads list model", () => {
     expect(supportsPhoto({ placement: "channel_post" })).toBe(true);
     expect(supportsPhoto({ placement: "bot_banner", target_type: "bots" })).toBe(false);
     expect(supportsPhoto({ target_type: "channels" })).toBe(true);
+  });
+});
+
+describe("faDigits", () => {
+  it("turns a server sentence's digits Persian", () => {
+    expect(faDigits("برای ساخت 3 آگهی جدید، 3 × 1 = 3 TON لازم است؛ موجودی فعلی 1.5 TON است.")).toBe(
+      "برای ساخت ۳ آگهی جدید، ۳ × ۱ = ۳ TON لازم است؛ موجودی فعلی ۱٫۵ TON است.",
+    );
   });
 });

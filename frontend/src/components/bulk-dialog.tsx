@@ -23,7 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api, errorMessage } from "@/lib/api";
 import { BULK_KIND_LABEL, supportsPhoto } from "@/lib/bulk";
-import { money, num } from "@/lib/format";
+import { faDigits, money, num } from "@/lib/format";
 import { accountApi, keys, useAction, useCapabilities, useTexts, useTracking } from "@/lib/queries";
 import type { Account, BulkKind, BulkMode, BulkOperation, BulkPreview, BulkRequest, Capabilities } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -555,12 +555,12 @@ function PreviewView({ p, currency }: { p: BulkPreview; currency: string }) {
       </div>
       {p.photo_summary && (
         <p className="rounded-md bg-muted/50 px-3 py-2 text-sm" data-testid="photo-summary">
-          {p.photo_summary}
+          {faDigits(p.photo_summary)}
         </p>
       )}
       {p.budget_line && (
         <p className="rounded-md bg-muted/50 px-3 py-2 text-sm" data-testid="budget-line">
-          {p.budget_line}
+          {faDigits(p.budget_line)}
           {p.totals.first_wave < p.totals.ads && ` موج اول: ${num(p.totals.first_wave)} آگهی.`}
         </p>
       )}
