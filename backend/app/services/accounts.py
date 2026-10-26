@@ -52,7 +52,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bulk_batch_size": 5,
     "bulk_batch_interval_seconds": 120,
     "bulk_max_in_review": 10,
-    "bulk_min_budget": 0.1,  # initial budget of a replacement funded later from the old ad
+    # Telegram refuses to create an ad with less initial budget than this (1 TON at the time of writing).
+    "min_initial_budget": 1.0,
+    # Initial budgets of new ads made by bulk replacements per 24 h (separate from the top-up cap).
+    "bulk_daily_new_budget_cap": 20.0,
     # New ads
     "default_cpm_channel": 0.45,
     "default_cpm_bot": 0.5,
@@ -61,10 +64,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bot_timezone": "Asia/Tehran",
     "purchase_types": ["buy", "buy_extend"],
     "toman_per_unit": 0,  # price of 1 TON/EUR/Star in Toman, for return on ad spend; 0 = not set
-    # Per-ad sales tracking: "pool" = referrer accounts owned by the advertiser (works with the bot today);
-    # "campaign" = random start codes, needs bot support that does not exist yet.
-    "tracking_mode": "pool",
+    # Referrer accounts owned by the advertiser, used for per-ad referral links.
     "referrer_pool": [],
+    # Result of the "random code tracking" test: does the bot record users who start it with an unknown
+    # numeric code? works | ignored | unknown (set by services/tracking.py, not edited by hand).
+    "random_tracking": "unknown",
 }
 
 INTERVAL_KEYS = {"sync_fast_seconds": 10, "sync_stats_seconds": 120, "sync_bot_seconds": 30}
@@ -90,6 +94,8 @@ def validate_settings_patch(patch: dict[str, Any]) -> dict[str, Any]:
                 raise AppError(f"مقدار {k} باید عدد باشد.") from None
             if num < 0:
                 raise AppError(f"مقدار {k} نمی‌تواند منفی باشد.")
+            if k == "min_initial_budget" and num <= 0:
+                raise AppError("حداقل بودجه‌ی اولیه باید بیشتر از صفر باشد.")
             if k in INTERVAL_KEYS:
                 # MIN_SYNC_SECONDS below 10 is a test setting that lowers every floor.
                 num = max(int(num), INTERVAL_KEYS[k] if floor >= 10 else floor)
@@ -113,12 +119,8 @@ def validate_settings_patch(patch: dict[str, Any]) -> dict[str, Any]:
                 if x not in ids:
                     ids.append(x)
             out[k] = ids[:500]
-        elif k == "tracking_mode":
-            if v not in ("pool", "campaign"):
-                raise AppError("حالت ردیابی نامعتبر است.")
-            if v == "campaign":
-                raise AppError("حالت «کد کمپین» به پشتیبانی ربات نیاز دارد و هنوز قابل فعال‌سازی نیست.")
-            out[k] = v
+        elif k == "random_tracking":
+            raise AppError("نتیجه‌ی آزمایش ردیابی کد رندوم فقط با خود آزمایش عوض می‌شود.")
     return out
 
 

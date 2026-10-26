@@ -140,6 +140,9 @@ class BulkIn(StrictModel):
     initial_budget: float | None = Field(None, ge=0)
     topup_after_withdraw: bool = False
     group_by: Literal["target", "cpm", "placement"] = "target"
+    referral_mode: Literal["pool", "shared", "random"] = "pool"
+    shared_referrer_id: str | None = Field(None, max_length=32)
+    shared_tag_id: int | None = None
     proposal_ids: list[int] | None = None
     confirm: bool = False
 

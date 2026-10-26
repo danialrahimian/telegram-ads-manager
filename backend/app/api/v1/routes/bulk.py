@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.api.deps import AccountDep, Auth, Session
 from app.core.errors import AppError, UpstreamError
 from app.integrations.telegram_ads import TelegramAdsError
-from app.models import BulkOperation
+from app.models import BulkOperation, ReferralTag
 from app.schemas.requests import BulkIn, ResubmitIn
 from app.services import accounts, bulk, events, referrals, tracking
 
@@ -99,14 +99,32 @@ async def resubmit(op_id: int, item_id: int, body: ResubmitIn, acc: AccountDep, 
 
 @router.get("/tracking")
 async def get_tracking(acc: AccountDep, s: Session) -> dict:
-    st = accounts.settings_of(acc)
+    tags = (
+        await s.execute(select(ReferralTag).where(ReferralTag.account_id == acc.id).order_by(ReferralTag.id))
+    ).scalars()
     return {
-        "mode": st["tracking_mode"],
         "modes": [m.public() for m in tracking.MODES],
         "campaign_request": tracking.CAMPAIGN_REQUEST,
-        "campaign_example": tracking.campaign_code(),
+        "random_example": tracking.random_code(),
+        "random": tracking.status(acc),
         "pool": await referrals.pool_status(s, acc),
+        "tags": [{"id": t.id, "name": t.name, "start_code": t.start_code, "kind": t.kind} for t in tags],
     }
+
+
+@router.post("/tracking/random/test")
+async def start_random_test(acc: AccountDep, s: Session) -> dict:
+    """Make a test code: start the bot with its link from an account that never used the bot, then check."""
+    test = await tracking.start_test(s, acc)
+    await s.commit()
+    return {"test": test, "random": tracking.status(acc)}
+
+
+@router.post("/tracking/random/check")
+async def check_random_test(acc: AccountDep, s: Session) -> dict:
+    test = await tracking.check_test(s, acc)
+    await s.commit()
+    return {"test": test, "random": tracking.status(acc)}
 
 
 @router.post("/tracking/pool/check")

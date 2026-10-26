@@ -1,13 +1,14 @@
 from datetime import date
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Query, UploadFile
 from sqlalchemy import func, or_, select
 
 from app.api.deps import AccountDep, Auth, Session
 from app.core.errors import AppError, NotFound
+from app.db.base import now_ts
 from app.models import Ad, AdStat, BulkItem, Job, Proposal
 from app.schemas.requests import AdActionIn, AdCreateIn, AdEditIn
-from app.services import actions, ads, budget, metrics
+from app.services import actions, ads, budget, metrics, periods
 from app.services.rules import KIND_LABEL
 
 router = APIRouter(prefix="/accounts/{slug}/ads", tags=["ads"], dependencies=[Auth])
@@ -16,7 +17,17 @@ MAX_PHOTO = 5 * 1024 * 1024
 
 
 @router.get("")
-async def list_ads(acc: AccountDep, s: Session, since: str | None = None, archived: bool = False) -> dict:
+async def list_ads(
+    acc: AccountDep,
+    s: Session,
+    since: str | None = None,
+    archived: bool = False,
+    period: str | None = None,
+    date_from: str | None = Query(None, alias="from"),
+    date_to: str | None = Query(None, alias="to"),
+) -> dict:
+    """Ads with lifetime numbers and, under `period_stats`, the numbers of the chosen period
+    (today, yesterday, 7d, 30d, month, all, custom with from/to) — see services/periods.py."""
     if since:
         try:
             since = date.fromisoformat(since).isoformat()
@@ -27,11 +38,12 @@ async def list_ads(acc: AccountDep, s: Session, since: str | None = None, archiv
             select(func.count(Ad.id)).where(Ad.account_id == acc.id, Ad.archived.is_(True), Ad.gone.is_(False))
         )
     ).scalar_one()
-    return {
-        "ads": await metrics.ad_rows(s, acc, since, archived=archived),
-        "since": since,
-        "archived_count": archived_count,
-    }
+    rows = await metrics.ad_rows(s, acc, since, archived=archived)
+    stats, meta = await periods.ad_period_stats(s, acc, period, date_from, date_to, now=now_ts())
+    empty = {"views": 0, "clicks": 0, "actions": 0, "spent": 0.0}
+    for r in rows:
+        r["period_stats"] = stats.get(r["ad_id"], empty)
+    return {"ads": rows, "since": since, "archived_count": archived_count, "period": meta}
 
 
 @router.get("/{ad_id}")

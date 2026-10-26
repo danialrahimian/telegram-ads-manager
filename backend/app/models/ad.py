@@ -85,3 +85,24 @@ class AdBudgetEvent(Base):
     amount: Mapped[float] = mapped_column(Float, default=0)
     remaining: Mapped[float] = mapped_column(Float, default=0)  # remaining budget after the change
     actor: Mapped[str] = mapped_column(String(16), default="sync")
+
+
+class AdDayBaseline(Base):
+    """An ad's lifetime counters at the start of a local day (the account's bot time zone).
+
+    Telegram's daily statistics are per UTC day; "today" in the panel starts at local midnight, so it is
+    the current counters minus this baseline, recorded by the first fast sync of the day.
+    """
+
+    __tablename__ = "ad_day_baselines"
+    __table_args__ = (UniqueConstraint("account_id", "ad_id", "day", name="uq_ad_day_baselines_day"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    ad_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)  # YYYY-MM-DD in the account's time zone
+    ts: Mapped[int] = mapped_column(Integer, default=0)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    actions: Mapped[int] = mapped_column(Integer, default=0)
+    spent: Mapped[float] = mapped_column(Float, default=0)

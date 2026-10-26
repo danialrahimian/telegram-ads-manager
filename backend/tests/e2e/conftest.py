@@ -52,6 +52,13 @@ class Stack:
     def add_user(self, key: str, referrer: str) -> None:
         httpx.post(f"http://127.0.0.1:{self.bot}/__test/add_user", json={"key": key, "referrer": referrer})
 
+    def start_bot(self, key: str, code: str) -> None:
+        """A new Telegram account opens the bot with ?start=<code>."""
+        httpx.post(f"http://127.0.0.1:{self.bot}/__test/start", json={"key": key, "code": code})
+
+    def bot_stores_unknown(self, value: bool = True) -> None:
+        httpx.post(f"http://127.0.0.1:{self.bot}/__test/stores_unknown", json={"value": value})
+
     def _tg(self, path: str, body: dict) -> object:
         return httpx.post(f"http://127.0.0.1:{self.tg}/__test/{path}", json=body).json()["result"]
 

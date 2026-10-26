@@ -13,6 +13,7 @@ from app.db.base import now_ts
 from app.integrations.telegram_ads import TelegramAdsError
 from app.models import Account, Ad, ReferralTag, TextVariant
 from app.services import accounts, actions, events
+from app.services import placement as placement_rules
 from app.services.accounts import settings_of
 from app.services.sync import start_code_of, target_summary
 
@@ -66,8 +67,11 @@ async def create(
         raise AppError("CPM و بودجه باید عدد باشند.") from None
     if cpm <= 0:
         raise AppError("CPM باید بیشتر از صفر باشد.")
-    if budget <= 0:
-        raise AppError("بودجه‌ی اولیه باید بیشتر از صفر باشد؛ آگهی بدون بودجه برای بررسی فرستاده نمی‌شود.")
+    min_budget = float(st["min_initial_budget"])
+    if budget + 1e-9 < min_budget:
+        raise AppError(
+            f"بودجه‌ی اولیه دست‌کم {min_budget:g} {acc.currency or 'TON'} است؛ تلگرام آگهی با بودجه‌ی کمتر نمی‌سازد."
+        )
     if budget > st["topup_max_per_ad"] * 5:
         raise AppError(f"بودجه‌ی اولیه بیشتر از {st['topup_max_per_ad'] * 5} مجاز نیست (پنج برابر سقف شارژ).")
     tag = await _tag(s, acc, data.get("tag_id"))
@@ -100,7 +104,7 @@ async def create(
         if kind == "bot" and data.get("show_userpic"):
             params["show_userpic"] = True
         try:
-            if photo and kind == "channel":
+            if photo and placement_rules.kind_supports_photo(kind):
                 up = await c.upload_photo(*photo)
                 params["photo_id"] = up["photo_id"]
             # Key tied to the request contents: a retry after a lost response cannot create a second ad.

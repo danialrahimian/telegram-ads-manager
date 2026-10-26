@@ -33,7 +33,7 @@ from app.integrations.bot_api import (
 )
 from app.integrations.telegram_ads import TelegramAdsClient, TelegramAdsError
 from app.models import Account, AccountSnapshot, Ad, AdStat, BotTransaction, BotUser, ReferralTag
-from app.services import bot_diag, budget, events
+from app.services import bot_diag, budget, events, periods
 from app.services.accounts import apply_account_info, settings_of
 
 log = get_logger("sync")
@@ -189,6 +189,11 @@ async def _fast_sync(account_id: int) -> dict[str, Any]:
         for ad_id, row in existing.items():
             if ad_id not in seen and not row.gone:
                 row.gone = True
+        await s.flush()
+        live = [
+            r for r in (await s.execute(select(Ad).where(Ad.account_id == account_id, Ad.gone.is_(False)))).scalars()
+        ]
+        await periods.record_baselines(s, a, live, now)
         last = (
             await s.execute(
                 select(AccountSnapshot.ts)
