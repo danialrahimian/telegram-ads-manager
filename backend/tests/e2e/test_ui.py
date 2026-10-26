@@ -467,8 +467,9 @@ def test_new_ad_form(page, stack: Stack, shot):
     page.get_by_role("button", name="ساخت و ارسال برای بررسی").click()
     expect(page.get_by_text(re.compile("موجودی حساب .* کافی نیست"))).to_be_visible()  # balance is 0.05
     page.get_by_label("بودجه‌ی اولیه").fill("0.5")
-    page.get_by_role("button", name="ساخت و ارسال برای بررسی").click()
+    # Under Telegram's 1 TON minimum the form says so and nothing is sent.
     expect(page.get_by_text(re.compile("بودجه‌ی اولیه دست‌کم"))).to_be_visible()
+    expect(page.get_by_role("button", name="ساخت و ارسال برای بررسی")).to_be_disabled()
     stack.set_balance("b", 3)
     page.get_by_label("بودجه‌ی اولیه").fill("1")
     shot(page, "13-ad-new")
@@ -580,15 +581,12 @@ def test_photo_on_all_ads_changes_only_channels(page, stack: Stack, shot):
     bot_item = items.filter(has_text="#102")
     expect(bot_item.get_by_text("رد شد — آگهی ربات عکس ندارد")).to_be_visible()
     expect(bot_item.get_by_text("ناموفق")).to_have_count(0)
+    # Every channel ad is replaced with the new photo (in waves if the stored balance is short); none fails.
+    expect(items.first).to_be_visible()
+    channel = items.count() - 1
+    _review_until(page, stack, "b", items, "قدیمی بازنشسته شد", channel)
     for ad_id in (101, 103):
-        expect(items.filter(has_text=f"#{ad_id}").get_by_text("در بررسی تلگرام")).to_be_visible(timeout=30_000)
-    for _ in range(40):
-        stack.review("b")
-        if items.get_by_text("قدیمی بازنشسته شد").count() >= 2:
-            break
-        page.wait_for_timeout(4000)
-    for ad_id in (101, 103):
-        expect(items.filter(has_text=f"#{ad_id}").get_by_text("قدیمی بازنشسته شد")).to_be_visible(timeout=20_000)
+        expect(items.filter(has_text=f"#{ad_id}").get_by_text("قدیمی بازنشسته شد")).to_be_visible()
     expect(items.get_by_text("ناموفق")).to_have_count(0)
     shot(page, "27-photo-done")
 

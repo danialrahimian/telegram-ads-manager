@@ -23,7 +23,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { BULK_KIND_LABEL, BULK_MODE_LABEL, ITEM_VARIANT, STEP_LABEL } from "@/lib/bulk";
-import { dateTime, money, num } from "@/lib/format";
+import { dateTime, faDigits, money, num } from "@/lib/format";
 import { accountApi, keys, useAction, useBulkOp, useBulkOps } from "@/lib/queries";
 import type { Account, BulkItem, BulkOperation, Capabilities } from "@/lib/types";
 
@@ -187,7 +187,7 @@ function OperationDetail({ account, id }: { account: Account; id: number }) {
           <Counts op={op} />
           {op.note && (
             <p className="text-xs text-muted-foreground" data-testid="bulk-note">
-              {op.note}
+              {faDigits(op.note)}
             </p>
           )}
           <Waves op={op} />
