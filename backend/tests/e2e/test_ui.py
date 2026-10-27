@@ -621,7 +621,7 @@ def test_edit_probe_finds_the_request_format_telegram_applies(page, stack: Stack
     expect(probe.get_by_text("اعمال نشد", exact=True)).to_have_count(1)  # JSON
     expect(probe.get_by_text("اعمال شد", exact=True)).to_have_count(1)  # form
     shot(page, "28-edit-probe")
-    dlg.get_by_role("button", name="بستن").click()
+    dlg.get_by_role("button", name="بستن").first.click()  # the footer one (the corner X has the same name)
     stack.ignore_edit_formats()
     _nav(page, "/accounts/psychonet/bulk")
     expect(page.get_by_test_id("edit-format")).to_have_text(re.compile("فرم"))
