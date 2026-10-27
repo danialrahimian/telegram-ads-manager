@@ -116,3 +116,46 @@ async def test_submit_every_ad_waiting_for_review(api, tg_mock):
     assert _submits(tg_mock) == 2
     assert {tg_mock.accounts["a"]["ads"][i]["status"] for i in (10, 11)} == {"in_review"}
     assert (await api.post(f"{A}/ads/submit-review")).json()["count"] == 0
+
+
+async def test_edit_shown_old_until_approval_is_checked_after_review(api, tg_mock):
+    """Telegram may keep returning the approved text while the edit waits for review: not an error yet."""
+    await _setup(api, tg_mock)
+    tg_mock.edits_wait_for_review = True
+    op = (
+        await api.post(
+            f"{A}/bulk", json={"kind": "content", "ad_ids": [3], "mode": "inplace", "text": TEXT, "confirm": True}
+        )
+    ).json()
+    await _drain()
+    (it,) = await _items(op["id"])
+    assert it.status == "in_review" and "تا تأیید" in it.error
+    tg_mock.review("a")
+    await _sync_all()
+    await _drain()
+    (it,) = await _items(op["id"])
+    assert it.status == "approved" and not it.error
+    assert (await api.get(f"{A}/ads/3")).json()["ad"]["text"] == TEXT
+
+    # A direct edit in the same situation is accepted with a note, not refused.
+    r = await api.patch(f"{A}/ads/3", json={"text": TEXT + " ✅"})
+    assert r.status_code == 200 and "تا تأیید" in r.json()["message"]
+
+
+async def test_edit_approved_with_the_old_text_fails_with_what_telegram_has(api, tg_mock):
+    await _setup(api, tg_mock)
+    tg_mock.edits_wait_for_review = True
+    tg_mock.drops_pending = True
+    before = tg_mock.accounts["a"]["ads"][3]["text"]
+    op = (
+        await api.post(
+            f"{A}/bulk", json={"kind": "content", "ad_ids": [3], "mode": "inplace", "text": TEXT, "confirm": True}
+        )
+    ).json()
+    await _drain()
+    tg_mock.review("a")
+    await _sync_all()
+    await _drain()
+    (it,) = await _items(op["id"])
+    assert it.status == "failed" and "تأیید کرد ولی متن جدید را اعمال نکرد" in it.error
+    assert before.split()[0] in it.error  # the text Telegram kept is quoted

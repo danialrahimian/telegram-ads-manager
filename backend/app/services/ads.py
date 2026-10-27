@@ -205,8 +205,10 @@ async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) 
         except TelegramAdsError as e:
             raise UpstreamError(f"تلگرام تغییر را نپذیرفت: {e.friendly}") from None
         missing = actions.unapplied(remote, raw)
+        if missing and raw.get("status") not in actions.IN_REVIEW:
+            raise UpstreamError(actions.not_applied_message(missing, raw))
         if missing:
-            raise UpstreamError(actions.not_applied_message(missing))
+            review_note = review_note or actions.pending_message(missing)
         ad.text = str(raw["text"]) if "text" in raw else str(remote.get("text") or ad.text)
         ad.promote_url = (
             str(raw["promote_url"]) if "promote_url" in raw else str(remote.get("promote_url") or ad.promote_url)

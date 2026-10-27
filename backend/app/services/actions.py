@@ -381,11 +381,38 @@ def unapplied(sent: dict[str, Any], raw: Any) -> list[str]:
     return out
 
 
-def not_applied_message(fields: list[str]) -> str:
+IN_REVIEW = ("in_review", READY)
+
+
+def _snippet(v: Any, n: int = 70) -> str:
+    t = " ".join(str(v or "").split())
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def not_applied_message(fields: list[str], raw: Any = None, *, after_review: bool = False) -> str:
+    """Says what Telegram kept, so a failure can be told apart from a normalised text."""
+    names = "، ".join(FIELD_LABEL.get(f, f) for f in fields)
+    got = raw if isinstance(raw, dict) else {}
+    seen = []
+    if "text" in fields and "text" in got:
+        seen.append(f"متن فعلی در تلگرام: «{_snippet(got['text'])}»")
+    if "promote_url" in fields and "promote_url" in got:
+        seen.append(f"لینک فعلی: {got['promote_url']}")
+    if got.get("status"):
+        seen.append(f"وضعیت: {got['status']}")
+    head = (
+        f"تلگرام آگهی را تأیید کرد ولی {names} جدید را اعمال نکرد."
+        if after_review
+        else f"تلگرام درخواست را پذیرفت ولی {names} آگهی عوض نشد."
+    )
+    return head + (f" ({'؛ '.join(seen)})" if seen else "") + " دوباره امتحان کنید یا در ads.telegram.org ویرایش کنید."
+
+
+def pending_message(fields: list[str]) -> str:
     names = "، ".join(FIELD_LABEL.get(f, f) for f in fields)
     return (
-        f"تلگرام درخواست را پذیرفت ولی {names} آگهی عوض نشد. "
-        "آگهی را در ads.telegram.org ببینید؛ اگر آنجا هم قدیمی است، دوباره امتحان کنید."
+        f"آگهی به بررسی تلگرام رفت؛ تلگرام تا تأیید، {names} قبلی را نشان می‌دهد. "
+        "بعد از تأیید دوباره چک می‌شود که تغییر اعمال شده باشد."
     )
 
 
@@ -539,6 +566,9 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
     raw, submit_error = await submit_if_ready(c, job.ad_id, raw)
     missing = unapplied({k: v for k, v in params.items() if k != "photo_id"}, raw)
     got: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    # Telegram may keep returning the approved version while the edit waits for review: checked again after
+    # approval (bulk.py) instead of failing now. Only an ad that did not go to review failed for sure.
+    pending = bool(missing) and got.get("status") in IN_REVIEW
     async with session_scope() as s:
         row = (
             await s.execute(select(Ad).where(Ad.account_id == job.account_id, Ad.ad_id == job.ad_id))
@@ -561,7 +591,7 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
             row.decline_reason = str((got.get("decline_reason") or {}).get("text") or "")
             if photo and isinstance(got.get("photo"), dict):
                 row.has_photo = True
-        fail_msg = not_applied_message(missing) if missing else ""
+        fail_msg = not_applied_message(missing, got) if missing and not pending else ""
         if fail_msg:
             if it is not None:
                 it.status, it.error, it.updated_ts = "failed", fail_msg, now_ts()
@@ -581,8 +611,11 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
                 if it.params.get("variant_id") and "text" in params:
                     row.variant_id = it.params["variant_id"]
             it.status, it.updated_ts = "in_review", now_ts()
+            it.params = {**(it.params or {}), "expect": {k: params[k] for k in ("text", "promote_url") if k in params}}
             if submit_error:
                 it.error = submit_error
+            elif pending:
+                it.error = pending_message(missing)
         if not fail_msg:
             events.log(
                 s, "edit_ad", account_id=job.account_id, actor="bulk", ad_id=job.ad_id, detail=", ".join(sorted(params))
@@ -591,6 +624,8 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
         return await _finish(job.id, "failed", fail_msg)
     if submit_error:
         return await _finish(job.id, "done", submit_error)
+    if pending:
+        return await _finish(job.id, "done", pending_message(missing))
     return await _finish(job.id, "done", "تغییر فرستاده شد؛ آگهی دوباره بررسی می‌شود")
 
 

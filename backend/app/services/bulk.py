@@ -805,8 +805,19 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
                     s, "bulk_declined", account_id=acc.id, ad_id=cand.ad_id, level="warn", detail=it.decline_reason
                 )
             elif cand.status == "active":
-                it.status = "approved"
-                it.step = "pause" if op.mode == "replace" else "done"
+                expect = (it.params or {}).get("expect") or {}
+                missing = [k for k, v in expect.items() if str(getattr(cand, k) or "").strip() != str(v or "").strip()]
+                if op.mode == "inplace" and missing:
+                    # Approved, yet Telegram still has the old text or link: the edit did not stick.
+                    it.status = "failed"
+                    it.error = actions.not_applied_message(
+                        missing, {k: getattr(cand, k) for k in missing} | {"status": cand.status}, after_review=True
+                    )
+                else:
+                    it.status = "approved"
+                    it.step = "pause" if op.mode == "replace" else "done"
+                    if it.error and it.error.startswith("آگهی به بررسی تلگرام رفت"):
+                        it.error = ""
             elif cand.status == actions.READY:
                 # Saved by Telegram but not sent to its moderators (an ad without budget): send it, once.
                 if not any(j.kind == "submit_review" for j in await _jobs_of(s, it.id)):

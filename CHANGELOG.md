@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.2.2 — edits waiting for Telegram's review
+
+- An edit Telegram accepted and sent to review is no longer reported as "not applied" just because Telegram still returns the approved text: the item waits in review with a note, and after approval the panel checks again that the ad really has the new text and link (it fails then, quoting what Telegram kept). A direct edit in that situation is accepted with the same note.
+- An edit that did not go to review and did not change the ad still fails at once; the message now quotes the text, link and status Telegram returned, so a real failure can be told apart from a text Telegram normalised.
+
 ## v2.2.1 — edits that never reached Telegram's review
 
 - Since September 2026 the Telegram Ads API saves an edited (or new) ad without budget as `ready_for_review` and does **not** send it to review until `submitAdForReview` is called; until then the ad keeps showing the old version. The panel now calls `submitAdForReview` right after such an edit or creation, after a top-up of such an ad, and from the bulk engine for items left in that state. Telegram's refusal to submit is shown on the item.

@@ -68,6 +68,10 @@ class TgAdsMock:
         self.supports_photo_edit = supports_photo_edit
         # A Telegram that answers ok to editAd but keeps the old ad (the panel must notice).
         self.ignores_edits = ignores_edits
+        # Possible real behaviour: the edit waits for review and the API keeps returning the approved text
+        # until moderators approve it; with drops_pending the approval keeps the old text anyway.
+        self.edits_wait_for_review = False
+        self.drops_pending = False
         self.lock = threading.Lock()
         self.accounts: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
@@ -145,6 +149,9 @@ class TgAdsMock:
             for a in self.accounts[key]["ads"].values():
                 if a["status"] != "in_review" or (ad_id is not None and a["ad_id"] != ad_id):
                     continue
+                waiting = self.accounts[key].get("pending", {}).pop(a["ad_id"], {})
+                if decision == "approve" and not self.drops_pending:
+                    a.update(waiting)
                 if decision == "approve":
                     a["status"] = "active"
                     a.pop("decline_reason", None)
@@ -287,7 +294,10 @@ class TgAdsMock:
                 if k in p:
                     if k == "text" and len(p[k]) > 160:
                         raise KeyError("AD_TEXT_TOO_LONG")
-                    a[k] = p[k]
+                    if self.edits_wait_for_review:
+                        st.setdefault("pending", {}).setdefault(a["ad_id"], {})[k] = p[k]
+                    else:
+                        a[k] = p[k]
                     self._to_review(a)
             return a
         if method == "submitAdForReview":
