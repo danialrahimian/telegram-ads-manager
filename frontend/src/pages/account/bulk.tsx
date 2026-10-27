@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { ConfirmButton } from "@/components/confirm-button";
 import { EmptyState } from "@/components/empty-state";
+import { EDIT_FORMAT_LABEL } from "@/components/edit-probe";
 import { useAccountCtx } from "@/components/layout/account-layout";
 import { PageHeader } from "@/components/page-header";
 import { QueryError } from "@/components/query-error";
@@ -54,6 +55,20 @@ function CapabilityNote({ account, caps }: { account: Account; caps?: Capabiliti
             حذف آگهی در API: <Badge variant={caps?.delete_ad === "yes" ? "success" : "secondary"}>{label(caps?.delete_ad)}</Badge>{" "}
             · عوض کردن عکس آگهی موجود: <Badge variant={caps?.edit_photo === "yes" ? "success" : "secondary"}>{label(caps?.edit_photo)}</Badge>
           </div>
+          <div>
+            ویرایش متن/لینک آگهی موجود:{" "}
+            <Badge
+              variant={caps?.edit_format === "none" ? "destructive" : caps?.edit_format && caps.edit_format !== "unknown" ? "success" : "secondary"}
+              data-testid="edit-format"
+            >
+              {EDIT_FORMAT_LABEL[caps?.edit_format ?? "unknown"]}
+            </Badge>
+          </div>
+          {caps?.edit_format === "unknown" && (
+            <p className="text-xs text-muted-foreground">
+              برای آزمایش ویرایش، صفحه‌ی یک آگهی را باز کنید و «آزمایش ویرایش در API» را بزنید.
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             {caps?.delete_ad === "yes"
               ? "آگهی‌های قدیمیِ جایگزین‌شده بعد از برداشت بودجه حذف می‌شوند."

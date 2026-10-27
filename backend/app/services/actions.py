@@ -316,6 +316,18 @@ async def _finish(job_id: int, status: str, result: str, extra: dict[str, Any] |
         )
 
 
+def answered_error(e: TelegramAdsError) -> bool:
+    """Telegram answered ok=false, so nothing was done: the retry needs a new idempotency key.
+
+    Telegram stores the answer of a key once the method started executing and replays it for 24 hours, so
+    reusing the key after e.g. AD_ACTIVE_RECENTLY would replay that refusal forever. After a network error
+    or a non-JSON answer the first try may have gone through, and only the same key keeps it from running
+    twice; a key still being processed is retried as it is.
+    """
+    err = e.error
+    return not (err.startswith("network") or err.startswith("HTTP ") or err == "IDEMPOTENT_REQUEST_IN_PROGRESS")
+
+
 async def _requeue(job_id: int, msg: str, delay: int, *, count_attempt: bool = True, new_key: bool = False) -> None:
     async with session_scope() as s:
         job = await s.get(Job, job_id)
@@ -556,8 +568,10 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
 
     params = {k: v for k, v in (job.params or {}).items() if k in ("text", "promote_url", "photo_id")}
     photo = params.get("photo_id")
+    async with session_scope() as s:
+        fmt = bulk.edit_format(await bulk.capabilities(s))
     try:
-        raw = await c.edit_ad(job.ad_id, **params)
+        raw = await c.edit_ad(job.ad_id, fmt=fmt, **params)
     except TelegramAdsError as e:
         if photo and "PHOTO" in e.error.upper():
             async with session_scope() as s:
@@ -665,7 +679,7 @@ async def process_due() -> int:
                 await _finish(job.id, "failed", f"خطای تلگرام: {e.friendly}")
                 continue
             delay = get_settings().withdraw_delay_seconds if job.kind == "withdraw" else 60
-            await _requeue(job.id, f"خطای تلگرام: {e.friendly}", delay, new_key=e.error == "IDEMPOTENT_PARAM_MISMATCH")
+            await _requeue(job.id, f"خطای تلگرام: {e.friendly}", delay, new_key=answered_error(e))
         except Exception as e:  # keep the worker alive whatever happens to one job
             log.exception("job %s failed", job.id)
             await _requeue(job.id, f"خطا: {e}", 60)

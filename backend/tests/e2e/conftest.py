@@ -72,6 +72,10 @@ class Stack:
     def set_balance(self, key: str, amount: float) -> None:
         self._tg("set_balance", {"key": key, "amount": amount})
 
+    def ignore_edit_formats(self, *formats: str) -> None:
+        """editAd answers ok but keeps the old content for these request formats (json, form, query)."""
+        self._tg("ignored_formats", {"formats": list(formats)})
+
 
 @pytest.fixture(scope="session")
 def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:

@@ -7,7 +7,7 @@ from app.api.deps import AccountDep, Auth, Session
 from app.core.errors import AppError, UpstreamError
 from app.integrations.telegram_ads import TelegramAdsError
 from app.models import BulkOperation, ReferralTag
-from app.schemas.requests import BulkIn, ResubmitIn
+from app.schemas.requests import BulkIn, EditProbeIn, ResubmitIn
 from app.services import accounts, bulk, events, referrals, tracking
 
 router = APIRouter(prefix="/accounts/{slug}", tags=["bulk"], dependencies=[Auth])
@@ -48,6 +48,15 @@ async def create_op(body: BulkIn, acc: AccountDep, s: Session) -> dict:
 @router.get("/bulk/capabilities")
 async def get_capabilities(acc: AccountDep, s: Session) -> dict:
     return await bulk.capabilities(s)
+
+
+@router.post("/bulk/edit-probe")
+async def edit_probe(body: EditProbeIn, acc: AccountDep, s: Session) -> dict:
+    if not body.confirm:
+        raise AppError("این آزمایش متن آگهی را واقعاً عوض می‌کند؛ تأیید لازم است.")
+    out = await bulk.probe_edit(s, acc, body.ad_id, body.text)
+    await s.commit()
+    return out
 
 
 @router.post("/bulk/capabilities/probe")

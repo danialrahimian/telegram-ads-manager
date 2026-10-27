@@ -441,9 +441,27 @@ export interface BotCheck {
 
 export type Capability = "yes" | "no" | "unknown";
 
+export interface EditProbeStep {
+  format: "json" | "form" | "query";
+  content_type: string;
+  sent: { ad_id: number; text: string };
+  answer: { ok: boolean; status?: string; text?: string; error?: string };
+  read_back: { status?: string; text?: string };
+  applied: boolean;
+}
+
+export interface EditProbeResult {
+  result: "json" | "form" | "query" | "none" | "pending";
+  message: string;
+  trace: EditProbeStep[];
+}
+
 export interface Capabilities {
   delete_ad: Capability;
   edit_photo: Capability;
+  /** How text/link edits are sent; "none" = Telegram applied no format (use replacement). */
+  edit_format: "json" | "form" | "query" | "none" | "unknown";
+  edit_probe: { ts: number; ad_id: number; result: EditProbeResult["result"]; trace: EditProbeStep[] } | null;
   checked_ts: number;
   source: string;
 }

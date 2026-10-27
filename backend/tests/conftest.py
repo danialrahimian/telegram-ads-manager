@@ -58,20 +58,16 @@ def bot_mock() -> BotMock:
 @pytest.fixture
 def http_mocks(tg_mock: TgAdsMock, bot_mock: BotMock) -> AsyncIterator[respx.MockRouter]:
     def tg_side_effect(request: httpx.Request) -> httpx.Response:
+        from tests.mocks.tgads_api import parse_request
+
         auth = request.headers.get("Authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
-        method = request.url.path.strip("/")
-        ctype = request.headers.get("Content-Type", "")
-        files: dict[str, bytes] = {}
-        if ctype.startswith("multipart/"):
-            from tests.mocks.server import _parse_multipart
-
-            params, files = _parse_multipart(request.content, ctype)
-        else:
-            params = json.loads(request.content or b"{}")
-        return httpx.Response(
-            200, json=tg_mock.handle(token, method, params, files, request.headers.get("Idempotency-Key"))
+        params, files, fmt = parse_request(
+            request.method, request.url.query.decode(), request.headers.get("Content-Type", ""), request.content
         )
+        idem = {"Idempotency-Key": request.headers["Idempotency-Key"]} if "Idempotency-Key" in request.headers else {}
+        body, headers = tg_mock.respond(token, request.url.path, params, files, idem, fmt)
+        return httpx.Response(200, json=body, headers=headers)
 
     def bot_side_effect(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content or b"{}")

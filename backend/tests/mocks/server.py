@@ -9,6 +9,7 @@ Extra endpoints for tests:
   Telegram    POST /__test/review {"key": "a", "ad_id": null, "decision": "approve"|"decline", "reason": ""}
               POST /__test/set_ad {"key": "a", "ad_id": 11, "fields": {"remaining_budget": 1.0}}
               POST /__test/set_balance {"key": "a", "amount": 5}
+              POST /__test/ignored_formats {"formats": ["json"]}  (editAd answers ok but keeps the content)
 """
 
 import argparse
@@ -18,22 +19,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tests.mocks.bot_mock import RAW, BotMock
+from tests.mocks.tgads_api import parse_multipart, parse_request
 from tests.mocks.tgads_mock import TgAdsMock
 
 
 def _parse_multipart(body: bytes, ctype: str) -> tuple[dict, dict]:
-    boundary = ctype.split("boundary=")[1].encode()
-    params, files = {}, {}
-    for part in body.split(b"--" + boundary):
-        if b"Content-Disposition" not in part:
-            continue
-        head, _, data = part.partition(b"\r\n\r\n")
-        name = head.split(b'name="')[1].split(b'"')[0].decode()
-        if b"filename=" in head:
-            files[name] = data.rstrip(b"\r\n")
-        else:
-            params[name] = data.rstrip(b"\r\n").decode()
-    return params, files
+    return parse_multipart(body, ctype)
 
 
 def make_tg_handler(mock: TgAdsMock) -> type[BaseHTTPRequestHandler]:
@@ -52,28 +43,36 @@ def make_tg_handler(mock: TgAdsMock) -> type[BaseHTTPRequestHandler]:
                 elif self.path == "/__test/set_balance":
                     mock.set_balance(key, float(body["amount"]))
                     res = True
+                elif self.path == "/__test/ignored_formats":
+                    mock.ignored_formats = set(body.get("formats") or [])
+                    res = True
                 else:
                     res = False
                 self._send(200, {"ok": True, "result": res})
                 return
-            auth = self.headers.get("Authorization", "")
-            token = auth[7:] if auth.startswith("Bearer ") else ""
             length = self.headers.get("Content-Length")
             if length is None:
                 self._send(411, {"ok": False, "error": "LENGTH_REQUIRED"})
                 return
-            body = self.rfile.read(int(length))
-            ctype = self.headers.get("Content-Type", "")
-            if ctype.startswith("multipart/"):
-                params, files = _parse_multipart(body, ctype)
-            else:
-                params, files = json.loads(body or b"{}"), {}
-            res = mock.handle(token, self.path.strip("/"), params, files, self.headers.get("Idempotency-Key"))
-            self._send(200, res)
+            self._api("POST", self.rfile.read(int(length)))
 
-        def _send(self, code: int, obj: dict) -> None:
+        def do_GET(self) -> None:
+            self._api("GET", b"")
+
+        def _api(self, http_method: str, body: bytes) -> None:
+            auth = self.headers.get("Authorization", "")
+            token = auth[7:] if auth.startswith("Bearer ") else ""
+            path, _, query = self.path.partition("?")
+            params, files, fmt = parse_request(http_method, query, self.headers.get("Content-Type", ""), body)
+            idem = self.headers.get("Idempotency-Key")
+            res, headers = mock.respond(token, path, params, files, {"Idempotency-Key": idem} if idem else {}, fmt)
+            self._send(200, res, headers)
+
+        def _send(self, code: int, obj: dict, headers: dict | None = None) -> None:
             b = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()

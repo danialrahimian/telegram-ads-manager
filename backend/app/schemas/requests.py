@@ -127,6 +127,12 @@ class PerAdText(StrictModel):
     text: str = Field(max_length=400)
 
 
+class EditProbeIn(StrictModel):
+    ad_id: int
+    text: str = Field(min_length=1, max_length=400)
+    confirm: bool = False
+
+
 class BulkIn(StrictModel):
     kind: Literal["content", "referral", "replace"]
     ad_ids: list[int] = Field(min_length=1, max_length=500)

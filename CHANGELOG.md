@@ -1,9 +1,18 @@
 # Changelog
 
-## v2.2.2 — edits waiting for Telegram's review
+## v2.2.2 — edits Telegram did not apply, and the whole Ads API under test
 
-- An edit Telegram accepted and sent to review is no longer reported as "not applied" just because Telegram still returns the approved text: the item waits in review with a note, and after approval the panel checks again that the ad really has the new text and link (it fails then, quoting what Telegram kept). A direct edit in that situation is accepted with the same note.
-- An edit that did not go to review and did not change the ad still fails at once; the message now quotes the text, link and status Telegram returned, so a real failure can be told apart from a text Telegram normalised.
+**Edits that Telegram answered "ok" to but did not store**
+- A real account showed it: `editAd` answered ok, the ad stayed active with its old text. New "آزمایش ویرایش در API" on the ad page (with explicit confirmation): the same edit is sent in each documented request format — JSON, `application/x-www-form-urlencoded`, URL query string — and the ad is read back after each try. The first format whose text sticks is saved and used for every later edit (bulk jobs and direct edits). The full trace (no token) can be copied.
+- When no format works, in-place text/link edits are refused with a pointer to replacement mode (which creates a new ad and always works); until the test has run, the preview warns.
+- An edit Telegram sent to review but still shows with the old text waits in review and is checked again after approval; an edit that did not go to review and changed nothing fails at once, quoting the text, link and status Telegram returned.
+
+**The Telegram Ads API documentation, all of it**
+- The client has every documented method (45) with their documented parameter names, and can send parameters as JSON, form or query string (lists and booleans JSON-serialized as documented).
+- The fake API used by the tests implements the documentation: request formats and GET, case-insensitive method names, idempotency (header or parameter, replay header, parameter mismatch, keys still running, 24 hours, nothing stored for failed validation), required parameters and limits (title 1-128 **bytes**, text 1-160 characters, URL 1-256, impression frequency 1-4, dates within a year, schedules), photo/video rules, all four target types (numeric channel ids only after resolving them by username), statuses (`ready_for_review` without budget), budgets and the 10 minutes of inactivity before `decreaseAdBudget`/`deleteAd`, related accounts and transfers, transactions, stats and reports, audiences, pixel and events, target lists.
+- `tests/test_tgads_api.py` covers it rule by rule (69 tests), including a check that every documented method is in the client and the fake API.
+- Found by the documentation: a job Telegram refused (e.g. a withdrawal refused with `AD_ACTIVE_RECENTLY` because the ad was paused less than 10 minutes ago) was retried with the same idempotency key, and Telegram replays the stored answer of a key for 24 hours, so the withdrawal could never succeed. A refused job now retries with a new key; after a network error or a non-JSON answer it keeps the key, so a request that may have gone through can never run twice.
+- Found by the documentation: ad titles are limited to 128 bytes, not characters; replacement and new ads now cut Persian titles by bytes instead of sending titles Telegram would refuse.
 
 ## v2.2.1 — edits that never reached Telegram's review
 
