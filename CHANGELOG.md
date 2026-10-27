@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.2.1 — edits that never reached Telegram's review
+
+- Since September 2026 the Telegram Ads API saves an edited (or new) ad without budget as `ready_for_review` and does **not** send it to review until `submitAdForReview` is called; until then the ad keeps showing the old version. The panel now calls `submitAdForReview` right after such an edit or creation, after a top-up of such an ad, and from the bulk engine for items left in that state. Telegram's refusal to submit is shown on the item.
+- Every edit is checked against the ad Telegram returns: if Telegram answers "ok" but the text, link or photo did not change, the bulk item fails with that message (and a direct edit returns an error) instead of being shown as sent; the panel keeps what Telegram really has.
+- `ready_for_review` is its own status: "Ready for Review" in the ads table (it was shown as "In Review"), "ارسال‌نشده برای بررسی" elsewhere, a "send for review" action on each such ad and a banner on the ads page that submits all of them at once.
+
 ## v2.2.0 — Telegram-style ads table, 1 TON minimum and waves, random referral links, today
 
 **Photos only where Telegram shows them**

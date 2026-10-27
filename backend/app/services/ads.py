@@ -111,6 +111,7 @@ async def create(
             fp = json.dumps([acc.id, title, text, url, username, cpm, budget], ensure_ascii=False)
             key = "create-" + hashlib.sha256(fp.encode()).hexdigest()[:32]
             raw = await c.create_ad(key, **params)
+            raw, _ = await actions.submit_if_ready(c, int(raw.get("ad_id") or 0), raw)
         except TelegramAdsError as e:
             raise UpstreamError(f"تلگرام آگهی را نساخت: {e.friendly}") from None
 
@@ -166,8 +167,12 @@ async def create(
     return ad
 
 
-async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) -> tuple[Ad, bool]:
-    """Change note/variant locally, or text/tracking link on Telegram (which sends the ad back to review)."""
+async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) -> tuple[Ad, bool, str]:
+    """Change note/variant locally, or text/tracking link on Telegram (which sends the ad back to review).
+
+    Returns the ad, whether Telegram was changed, and a warning when Telegram kept the ad out of review.
+    """
+    review_note = ""
     ad = (await s.execute(select(Ad).where(Ad.account_id == acc.id, Ad.ad_id == ad_id))).scalar_one_or_none()
     if ad is None:
         raise NotFound("این آگهی پیدا نشد.")
@@ -196,10 +201,16 @@ async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) 
         try:
             async with accounts.tg_client(acc) as c:
                 raw = await c.edit_ad(ad_id, **remote)
+                raw, review_note = await actions.submit_if_ready(c, ad_id, raw)
         except TelegramAdsError as e:
             raise UpstreamError(f"تلگرام تغییر را نپذیرفت: {e.friendly}") from None
-        ad.text = str(raw.get("text") or remote.get("text") or ad.text)
-        ad.promote_url = str(raw.get("promote_url") or remote.get("promote_url") or ad.promote_url)
+        missing = actions.unapplied(remote, raw)
+        if missing:
+            raise UpstreamError(actions.not_applied_message(missing))
+        ad.text = str(raw["text"]) if "text" in raw else str(remote.get("text") or ad.text)
+        ad.promote_url = (
+            str(raw["promote_url"]) if "promote_url" in raw else str(remote.get("promote_url") or ad.promote_url)
+        )
         ad.start_code = start_code_of(ad.promote_url)
         tags = {
             t.start_code: t.id
@@ -212,4 +223,4 @@ async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) 
             if v is None or v.text.strip() != ad.text:
                 ad.variant_id = None
         events.log(s, "edit_ad", account_id=acc.id, actor="user", ad_id=ad_id, detail=", ".join(sorted(remote)))
-    return ad, bool(remote)
+    return ad, bool(remote), review_note

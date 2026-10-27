@@ -61,10 +61,13 @@ class TgAdsMock:
         *,
         supports_delete: bool = False,
         supports_photo_edit: bool = True,
+        ignores_edits: bool = False,
     ) -> None:
         self.inactive_seconds = inactive_seconds
         self.supports_delete = supports_delete
         self.supports_photo_edit = supports_photo_edit
+        # A Telegram that answers ok to editAd but keeps the old ad (the panel must notice).
+        self.ignores_edits = ignores_edits
         self.lock = threading.Lock()
         self.accounts: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
@@ -150,6 +153,13 @@ class TgAdsMock:
                     a["decline_reason"] = {"text": reason or "Ad text violates the guidelines"}
                 done.append(a["ad_id"])
             return done
+
+    @staticmethod
+    def _to_review(a: dict[str, Any]) -> None:
+        """Real behaviour (Ads API, September 2026): an edited ad goes to review by itself only when it has
+        budget; otherwise it waits as "ready_for_review" until submitAdForReview."""
+        a["status"] = "in_review" if a["remaining_budget"] > 0 else "ready_for_review"
+        a.pop("decline_reason", None)
 
     def set_ad(self, key: str, ad_id: int, **fields: Any) -> None:
         with self.lock:
@@ -261,10 +271,11 @@ class TgAdsMock:
             a = ads.get(int(p["ad_id"]))
             if not a:
                 raise KeyError("AD_ID_INVALID")
+            if self.ignores_edits:
+                return a
             if "photo_id" in p and self.supports_photo_edit:
                 a["photo"] = {"photo_id": p["photo_id"]}
-                a["status"] = "in_review"
-                a.pop("decline_reason", None)
+                self._to_review(a)
             if "is_paused" in p:
                 paused = p["is_paused"] in (True, "true", "True", 1, "1")
                 a["is_paused"] = paused
@@ -277,8 +288,15 @@ class TgAdsMock:
                     if k == "text" and len(p[k]) > 160:
                         raise KeyError("AD_TEXT_TOO_LONG")
                     a[k] = p[k]
-                    a["status"] = "in_review"
-                    a.pop("decline_reason", None)
+                    self._to_review(a)
+            return a
+        if method == "submitAdForReview":
+            a = ads.get(int(p["ad_id"]))
+            if not a:
+                raise KeyError("AD_ID_INVALID")
+            if a["status"] != "ready_for_review":
+                raise KeyError("AD_STATUS_INVALID")
+            a["status"] = "in_review"
             return a
         if method == "deleteAd" and self.supports_delete:
             if "ad_id" not in p:

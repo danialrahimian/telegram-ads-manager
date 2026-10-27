@@ -1,4 +1,4 @@
-import { BanknoteIcon, MoreVerticalIcon, PauseIcon, PlayIcon, Undo2Icon } from "lucide-react";
+import { BanknoteIcon, MoreVerticalIcon, PauseIcon, PlayIcon, SendIcon, Undo2Icon } from "lucide-react";
 import { useState } from "react";
 import { Field } from "@/components/field";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ import { money } from "@/lib/format";
 import { accountApi, keys, useAction } from "@/lib/queries";
 import type { Account, AdRow } from "@/lib/types";
 
-type Kind = "pause" | "resume" | "withdraw" | "topup";
+type Kind = "pause" | "resume" | "withdraw" | "topup" | "submit_review";
 
 export function useAdAction(account: Account) {
   return useAction<{ adId: number; action: Kind; amount?: number }, { message: string }>({
@@ -56,6 +56,11 @@ export function AdActions({ account, ad, compact }: { account: Account; ad: AdRo
           )}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          {ad.status === "ready_for_review" && (
+            <DropdownMenuItem onSelect={() => act.mutate({ adId: ad.ad_id, action: "submit_review" })}>
+              <SendIcon /> ارسال برای بررسی تلگرام
+            </DropdownMenuItem>
+          )}
           {canPause && (
             <DropdownMenuItem onSelect={() => act.mutate({ adId: ad.ad_id, action: "pause" })}>
               <PauseIcon /> توقف موقت

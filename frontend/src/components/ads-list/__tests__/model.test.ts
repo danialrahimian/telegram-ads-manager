@@ -46,7 +46,8 @@ describe("ads list model", () => {
   it("uses Telegram Ads status words", () => {
     expect(statusKey({ status: "active", is_paused: false })).toBe("active");
     expect(statusKey({ status: "active", is_paused: true })).toBe("on_hold");
-    expect(statusKey({ status: "ready_for_review", is_paused: false })).toBe("in_review");
+    expect(statusKey({ status: "ready_for_review", is_paused: false })).toBe("ready");
+    expect(statusKey({ status: "in_review", is_paused: false })).toBe("in_review");
     expect(statusKey({ status: "declined", is_paused: false })).toBe("declined");
     expect(statusKey({ status: "stopped", is_paused: true })).toBe("stopped");
   });

@@ -119,6 +119,13 @@ async def get_ad(ad_id: int, acc: AccountDep, s: Session) -> dict:
     }
 
 
+@router.post("/submit-review")
+async def submit_ready_ads(acc: AccountDep, s: Session) -> dict:
+    n = await actions.submit_all_ready(s, acc)
+    await s.commit()
+    return {"count": n, "message": f"{n} آگهی برای بررسی تلگرام در صف رفت." if n else "آگهی منتظر ارسالی نیست."}
+
+
 @router.post("/{ad_id}/actions")
 async def ad_action(ad_id: int, body: AdActionIn, acc: AccountDep, s: Session) -> dict:
     msg = await actions.ad_action(s, acc, ad_id, body.action, body.amount)
@@ -131,11 +138,11 @@ async def edit_ad(ad_id: int, body: AdEditIn, acc: AccountDep, s: Session) -> di
     data = body.model_dump(exclude_unset=True)
     if data.pop("clear_tag", False):
         data["tag_id"] = None
-    _, remote = await ads.edit(s, acc, ad_id, data)
+    _, remote, review_note = await ads.edit(s, acc, ad_id, data)
     await s.commit()
     return {
         "remote_changed": remote,
-        "message": "تغییر به تلگرام فرستاده شد؛ آگهی دوباره بررسی می‌شود." if remote else "ذخیره شد.",
+        "message": review_note or ("تغییر به تلگرام فرستاده شد؛ آگهی دوباره بررسی می‌شود." if remote else "ذخیره شد."),
     }
 
 

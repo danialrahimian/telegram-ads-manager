@@ -324,6 +324,20 @@ def test_ads_table_filters(page, shot):
     expect(page).not_to_have_url(re.compile(r"status="))
 
 
+def test_ads_ready_for_review_are_submitted(page, stack: Stack, shot):
+    # Telegram saved an edit of an ad without budget but did not send it to review (Ads API, September 2026).
+    stack.set_ad("a", 10, status="ready_for_review")
+    _nav(page, "/accounts/psychonet/ads")
+    banner = page.get_by_test_id("ready-for-review")
+    expect(banner).to_be_visible(timeout=45_000)
+    expect(page.locator("tbody tr", has_text="old_stopped").get_by_text("Ready for Review")).to_be_visible()
+    shot(page, "17c-ready-for-review")
+    banner.get_by_role("button", name=re.compile("for review")).click()
+    expect(page.get_by_text(re.compile("برای بررسی تلگرام در صف رفت"))).to_be_visible()
+    expect(banner).to_be_hidden(timeout=45_000)
+    expect(page.locator("tbody tr", has_text="old_stopped").get_by_text("In Review")).to_be_visible()
+
+
 def test_referral_links_for_every_ad(page, stack: Stack, shot):
     _nav(page, "/accounts/psychonet/settings#tracking")
     page.get_by_label("تعداد آگهی در هر دسته").fill("20")

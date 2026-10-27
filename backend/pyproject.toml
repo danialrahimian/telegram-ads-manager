@@ -1,6 +1,6 @@
 [project]
 name = "telegram-ads-manager"
-version = "2.2.0"
+version = "2.2.1"
 description = "Self-hosted manager for several Telegram Ads accounts and their sales bots"
 requires-python = ">=3.12"
 license = { text = "MIT" }
