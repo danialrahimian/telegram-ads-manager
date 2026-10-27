@@ -605,6 +605,28 @@ def test_photo_on_all_ads_changes_only_channels(page, stack: Stack, shot):
     shot(page, "27-photo-done")
 
 
+def test_edit_probe_finds_the_request_format_telegram_applies(page, stack: Stack, shot):
+    # The real account: editAd answered ok to JSON but the ad stayed active with its old text.
+    stack.ignore_edit_formats("json")
+    _nav(page, "/accounts/psychonet/ads/1")
+    page.get_by_role("button", name="آزمایش ویرایش در API").click()
+    dlg = page.get_by_role("dialog")
+    dlg.get_by_label("متن تازه‌ی این آگهی").fill("سایکونت | اینترنت پایدار، تست رایگان در ربات 👇")
+    run = dlg.get_by_role("button", name="آزمایش و ویرایش")
+    expect(run).to_be_disabled()  # needs the explicit confirmation
+    dlg.get_by_label(re.compile("می‌دانم متن این آگهی")).click()
+    run.click()
+    probe = dlg.get_by_test_id("edit-probe")
+    expect(probe.get_by_text(re.compile("با فرم .* اعمال شد"))).to_be_visible(timeout=20_000)
+    expect(probe.get_by_text("اعمال نشد", exact=True)).to_have_count(1)  # JSON
+    expect(probe.get_by_text("اعمال شد", exact=True)).to_have_count(1)  # form
+    shot(page, "28-edit-probe")
+    dlg.get_by_role("button", name="بستن").first.click()  # the footer one (the corner X has the same name)
+    stack.ignore_edit_formats()
+    _nav(page, "/accounts/psychonet/bulk")
+    expect(page.get_by_test_id("edit-format")).to_have_text(re.compile("فرم"))
+
+
 OVERFLOW_JS = r"""
 () => {
   // Elements that stick out of the page content area (or the screen), ignoring horizontally scrollable boxes.

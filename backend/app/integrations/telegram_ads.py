@@ -11,15 +11,33 @@ import httpx
 from app.core.config import get_settings
 
 READ_METHODS = {
+    "getAccountInfo",
+    "getRelatedAccountsList",
+    "getTransactionStatus",
     "getCurrentAccount",
-    "getAdsList",
+    "getAccountsById",
+    "getAccountTransactionsList",
+    "getAccountStats",
+    "getAccountReport",
     "getAdsById",
+    "getAdsList",
+    "getAdTransactionsList",
     "getAdStats",
+    "getAudiencesById",
+    "getAudiencesList",
+    "getPixel",
+    "getPixelEventsById",
+    "getPixelEventsList",
+    "getTargetLanguagesList",
+    "getTargetTopicsList",
+    "getTargetCountriesList",
+    "getTargetLocationsById",
+    "getTargetLocationsList",
     "getTargetChannel",
     "getTargetBot",
-    "getAccountStats",
-    "getAdTransactionsList",
 }
+# The documented ways of passing parameters (multipart is used for file uploads only).
+FORMATS = ("json", "form", "query")
 
 ERROR_HINTS = {
     "ACCESS_TOKEN_INVALID": "توکن نامعتبر است یا باطل شده. از Telegram Ads ← API توکن تازه بگیرید.",
@@ -56,14 +74,32 @@ class TelegramAdsError(Exception):
         return self.error
 
 
+def flat(v: Any) -> str:
+    """A parameter as a string for the query string or a form: lists/objects JSON-serialized (as documented)."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, list | dict):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
+
+
+def clip_bytes(text: str, limit: int = 128) -> str:
+    """Cut to `limit` UTF-8 bytes without splitting a character (ad titles are "1-128 bytes", not characters)."""
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
 def floor_amount(x: float, places: str = "0.00001") -> float:
     """Round down to the API's amount precision so we never ask for more than exists."""
     return float(Decimal(str(x)).quantize(Decimal(places), rounding=ROUND_DOWN))
 
 
 class TelegramAdsClient:
-    def __init__(self, token: str, *, base: str | None = None, http: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self, token: str, *, base: str | None = None, http: httpx.AsyncClient | None = None, edit_format: str = "json"
+    ) -> None:
         self.token = token
+        # How editAd content changes are sent (see services/bulk.py: probe_edit finds the one Telegram applies).
+        self.edit_format = edit_format if edit_format in FORMATS else "json"
         self.base = (base or get_settings().telegram_ads_api_base).rstrip("/")
         self._http = http
         self._own_http = http is None
@@ -90,6 +126,7 @@ class TelegramAdsClient:
         *,
         idempotency_key: str | None = None,
         files: dict[str, tuple[str, bytes, str]] | None = None,
+        fmt: str = "json",
         **params: Any,
     ) -> Any:
         headers = {"Authorization": f"Bearer {self.token}"}
@@ -99,11 +136,14 @@ class TelegramAdsClient:
         last_error = ""
         for attempt in range(retries):
             try:
+                url = f"{self.base}/{method}"
                 if files:
-                    data = {
-                        k: json.dumps(v) if isinstance(v, list | dict | bool) else str(v) for k, v in params.items()
-                    }
-                    resp = await self.http.post(f"{self.base}/{method}", headers=headers, data=data, files=files)
+                    data = {k: flat(v) for k, v in params.items()}
+                    resp = await self.http.post(url, headers=headers, data=data, files=files)
+                elif fmt == "form":
+                    resp = await self.http.post(url, headers=headers, data={k: flat(v) for k, v in params.items()})
+                elif fmt == "query":
+                    resp = await self.http.get(url, headers=headers, params={k: flat(v) for k, v in params.items()})
                 else:
                     # Always send a JSON body: Telegram answers HTTP 411 to a body-less POST.
                     resp = await self.http.post(f"{self.base}/{method}", headers=headers, json=params)
@@ -167,8 +207,8 @@ class TelegramAdsClient:
     async def set_paused(self, ad_id: int, paused: bool) -> dict[str, Any]:
         return await self.call("editAd", ad_id=ad_id, is_paused=paused)
 
-    async def edit_ad(self, ad_id: int, **fields: Any) -> dict[str, Any]:
-        return await self.call("editAd", ad_id=ad_id, return_target=True, **fields)
+    async def edit_ad(self, ad_id: int, *, fmt: str | None = None, **fields: Any) -> dict[str, Any]:
+        return await self.call("editAd", fmt=fmt or self.edit_format, ad_id=ad_id, return_target=True, **fields)
 
     async def submit_for_review(self, ad_id: int) -> dict[str, Any]:
         """submitAdForReview: Telegram leaves an edited or new ad with an empty budget as "ready_for_review"
@@ -229,3 +269,136 @@ def classify_probe(e: TelegramAdsError) -> str:
     if "NOT_FOUND" in err or "UNKNOWN" in err:
         return "no"
     return "unknown"
+
+
+class TelegramAdsApi(TelegramAdsClient):
+    """Every method of the Telegram Ads API documentation, with its documented parameter names.
+
+    The panel itself uses only a part (above); the rest is here so the whole documented API is covered by
+    tests (tests/test_tgads_api.py). Optional parameters go in **opt with their documented names.
+    """
+
+    # accounts
+    async def create_account(
+        self, title: str, full_name: str, email: str, phone_number: str, country: str, city: str, key: str, **opt: Any
+    ) -> dict[str, Any]:
+        return await self.call(
+            "createAccount",
+            idempotency_key=key,
+            title=title,
+            full_name=full_name,
+            email=email,
+            phone_number=phone_number,
+            country=country,
+            city=city,
+            **opt,
+        )
+
+    async def edit_account_info(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("editAccountInfo", **opt)
+
+    async def account_info(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("getAccountInfo", **opt)
+
+    async def related_accounts(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("getRelatedAccountsList", **opt)
+
+    async def increase_account_budget(self, account_id: str, amount: float, key: str) -> dict[str, Any]:
+        return await self.call(
+            "increaseAccountBudget", idempotency_key=key, account_id=account_id, amount=floor_amount(amount)
+        )
+
+    async def decrease_account_budget(self, account_id: str, amount: float, key: str) -> dict[str, Any]:
+        return await self.call(
+            "decreaseAccountBudget", idempotency_key=key, account_id=account_id, amount=floor_amount(amount)
+        )
+
+    async def transaction_status(self, transaction_id: str) -> dict[str, Any]:
+        return await self.call("getTransactionStatus", transaction_id=transaction_id)
+
+    async def accounts_by_id(self, account_ids: list[str]) -> list[dict[str, Any]]:
+        return await self.call("getAccountsById", account_ids=account_ids)
+
+    async def account_transactions(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("getAccountTransactionsList", **opt)
+
+    async def account_stats(self, from_time: int, to_time: int, interval: int, **opt: Any) -> list[dict[str, Any]]:
+        return await self.call("getAccountStats", from_time=from_time, to_time=to_time, interval=interval, **opt)
+
+    async def account_report(self, year: int, month: int, **opt: Any) -> list[dict[str, Any]]:
+        return await self.call("getAccountReport", year=year, month=month, **opt)
+
+    # uploads
+    async def upload_video(self, filename: str, content: bytes, content_type: str = "video/mp4") -> dict[str, Any]:
+        return await self.call("uploadAdVideo", files={"file": (filename, content, content_type)})
+
+    async def upload_website_photo(self, filename: str, content: bytes, content_type: str) -> dict[str, Any]:
+        return await self.call("uploadWebsitePhoto", files={"file": (filename, content, content_type)})
+
+    # ads
+    async def edit_ad_status(self, ad_id: int, is_paused: bool) -> dict[str, Any]:
+        """Deprecated by Telegram; editAd(is_paused=...) is what the panel uses."""
+        return await self.call("editAdStatus", ad_id=ad_id, is_paused=is_paused)
+
+    async def ad_transactions(self, ad_id: int, **opt: Any) -> dict[str, Any]:
+        return await self.call("getAdTransactionsList", ad_id=ad_id, **opt)
+
+    async def ad_stats(self, ad_id: int, from_time: int, to_time: int, interval: int) -> list[dict[str, Any]]:
+        return await self.call("getAdStats", ad_id=ad_id, from_time=from_time, to_time=to_time, interval=interval)
+
+    async def ads_page(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("getAdsList", **opt)
+
+    # audiences
+    async def create_audience(self, title: str, key: str, **opt: Any) -> dict[str, Any]:
+        return await self.call("createAudience", idempotency_key=key, title=title, **opt)
+
+    async def edit_audience(self, audience_id: int, **opt: Any) -> dict[str, Any]:
+        return await self.call("editAudience", audience_id=audience_id, **opt)
+
+    async def delete_audience(self, audience_id: int) -> Any:
+        return await self.call("deleteAudience", audience_id=audience_id)
+
+    async def audiences_by_id(self, audience_ids: list[int]) -> list[dict[str, Any]]:
+        return await self.call("getAudiencesById", audience_ids=audience_ids)
+
+    async def audiences(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("getAudiencesList", **opt)
+
+    # pixel
+    async def create_pixel(self, key: str) -> dict[str, Any]:
+        return await self.call("createPixel", idempotency_key=key)
+
+    async def pixel(self) -> dict[str, Any]:
+        return await self.call("getPixel")
+
+    async def create_pixel_event(self, title: str, type: str, key: str) -> dict[str, Any]:
+        return await self.call("createPixelEvent", idempotency_key=key, title=title, type=type)
+
+    async def edit_pixel_event(self, event_id: str, title: str) -> dict[str, Any]:
+        return await self.call("editPixelEvent", event_id=event_id, title=title)
+
+    async def delete_pixel_event(self, event_id: str) -> Any:
+        return await self.call("deletePixelEvent", event_id=event_id)
+
+    async def pixel_events_by_id(self, event_ids: list[str]) -> list[dict[str, Any]]:
+        return await self.call("getPixelEventsById", event_ids=event_ids)
+
+    async def pixel_events(self, **opt: Any) -> dict[str, Any]:
+        return await self.call("getPixelEventsList", **opt)
+
+    # targets
+    async def target_languages(self) -> list[dict[str, Any]]:
+        return await self.call("getTargetLanguagesList")
+
+    async def target_topics(self) -> list[dict[str, Any]]:
+        return await self.call("getTargetTopicsList")
+
+    async def target_countries(self) -> list[dict[str, Any]]:
+        return await self.call("getTargetCountriesList")
+
+    async def target_locations_by_id(self, location_ids: list[int]) -> list[dict[str, Any]]:
+        return await self.call("getTargetLocationsById", location_ids=location_ids)
+
+    async def target_locations(self, country_code: str, query: str, **opt: Any) -> dict[str, Any]:
+        return await self.call("getTargetLocationsList", country_code=country_code, query=query, **opt)

@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router";
 import { AdActions } from "@/components/ad-actions";
 import { AdStatusBadge, placementLabel } from "@/components/ad-status";
 import { CopyButton } from "@/components/copy-button";
+import { EditProbe } from "@/components/edit-probe";
 import { Field } from "@/components/field";
 import { useAccountCtx } from "@/components/layout/account-layout";
 import { QueryError } from "@/components/query-error";
@@ -214,6 +215,7 @@ export default function AdDetailPage() {
               {ad.start_code && <Badge variant="outline" className="ltr">start={ad.start_code}</Badge>}
             </div>
             {ad.note && <p className="text-xs text-muted-foreground">یادداشت: {ad.note}</p>}
+            <EditProbe account={account} ad={ad} />
           </CardContent>
         </Card>
 

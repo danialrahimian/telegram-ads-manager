@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, NotFound, UpstreamError
 from app.db.base import now_ts
-from app.integrations.telegram_ads import TelegramAdsError
+from app.integrations.telegram_ads import TelegramAdsError, clip_bytes
 from app.models import Account, Ad, ReferralTag, TextVariant
 from app.services import accounts, actions, events
 from app.services import placement as placement_rules
@@ -92,7 +92,7 @@ async def create(
         except TelegramAdsError as e:
             raise AppError(f"تلگرام این جایگاه را نپذیرفت: {e.friendly}") from None
         params: dict[str, Any] = {
-            "title": title[:120],
+            "title": clip_bytes(title),
             "text": text,
             "promote_url": url,
             "cpm": cpm,
@@ -198,15 +198,22 @@ async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) 
     if remote:
         if acc.automation_paused:
             raise AppError("اقدام‌های این حساب متوقف است.", code="automation_paused")
+        from app.services import bulk
+
+        cap = await bulk.capabilities(s)
+        if cap["edit_format"] == "none":
+            raise AppError(bulk.EDIT_NOT_APPLIED)
         try:
             async with accounts.tg_client(acc) as c:
-                raw = await c.edit_ad(ad_id, **remote)
+                raw = await c.edit_ad(ad_id, fmt=bulk.edit_format(cap), **remote)
                 raw, review_note = await actions.submit_if_ready(c, ad_id, raw)
         except TelegramAdsError as e:
             raise UpstreamError(f"تلگرام تغییر را نپذیرفت: {e.friendly}") from None
         missing = actions.unapplied(remote, raw)
+        if missing and raw.get("status") not in actions.IN_REVIEW:
+            raise UpstreamError(actions.not_applied_message(missing, raw))
         if missing:
-            raise UpstreamError(actions.not_applied_message(missing))
+            review_note = review_note or actions.pending_message(missing)
         ad.text = str(raw["text"]) if "text" in raw else str(remote.get("text") or ad.text)
         ad.promote_url = (
             str(raw["promote_url"]) if "promote_url" in raw else str(remote.get("promote_url") or ad.promote_url)

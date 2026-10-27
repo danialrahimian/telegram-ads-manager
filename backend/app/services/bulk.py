@@ -36,7 +36,7 @@ from app.core.errors import AppError, NotFound
 from app.core.logging import get_logger
 from app.db.base import now_ts
 from app.db.session import session_scope
-from app.integrations.telegram_ads import TelegramAdsError
+from app.integrations.telegram_ads import FORMATS, TelegramAdsError, clip_bytes
 from app.models import Account, Ad, BulkItem, BulkOperation, Job, Proposal, TextVariant
 from app.services import (
     accounts,
@@ -80,9 +80,100 @@ async def capabilities(s: AsyncSession) -> dict[str, Any]:
     return {
         "delete_ad": cap.get("delete_ad", "unknown"),
         "edit_photo": cap.get("edit_photo", "unknown"),
+        # How editAd text/link changes must be sent: "json" | "form" | "query" (found by probe_edit),
+        # "none" (Telegram applied none of them), "unknown" (not tested yet; JSON is sent).
+        "edit_format": cap.get("edit_format", "unknown"),
+        "edit_probe": cap.get("edit_probe"),
         "checked_ts": cap.get("checked_ts", 0),
         "source": cap.get("source", ""),
     }
+
+
+def edit_format(cap: dict[str, Any]) -> str:
+    return cap["edit_format"] if cap.get("edit_format") in FORMATS else "json"
+
+
+EDIT_NOT_APPLIED = (
+    "آزمایش ویرایش نشان داد Telegram Ads API تغییر متن و لینک آگهی موجود را اعمال نمی‌کند؛ "
+    "حالت «جایگزینی» را انتخاب کنید (آگهی تازه با متن جدید ساخته می‌شود)."
+)
+CONTENT_TYPE = {"json": "application/json", "form": "application/x-www-form-urlencoded", "query": "GET ?query"}
+
+
+async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str) -> dict[str, Any]:
+    """Edit one ad's text for real, in each documented request format, until Telegram stores it.
+
+    For an ad that stayed "active" with its old text after editAd answered ok. Each try is read back with
+    getAdsById; the first format whose text sticks is remembered and used for every later edit. The whole
+    trace (no token) is kept for the bot developer / us. Only run after the user confirmed it.
+    """
+    from app.services.ads import validate_text
+
+    text = validate_text(text)
+    row = (await s.execute(select(Ad).where(Ad.account_id == acc.id, Ad.ad_id == ad_id))).scalar_one_or_none()
+    if row is None:
+        raise NotFound("این آگهی پیدا نشد.")
+    trace: list[dict[str, Any]] = []
+    result, note = "none", ""
+    try:
+        async with accounts.tg_client(acc) as c:
+            before = (await c.ads_by_id([ad_id])).get(ad_id)
+            if before is None:
+                raise AppError("تلگرام این آگهی را پیدا نکرد.")
+            if str(before.get("text") or "").strip() == text.strip():
+                raise AppError("متن تازه باید با متن فعلی آگهی در تلگرام فرق داشته باشد.")
+            after: dict[str, Any] = before
+            for fmt in FORMATS:
+                entry: dict[str, Any] = {
+                    "format": fmt,
+                    "content_type": CONTENT_TYPE[fmt],
+                    "sent": {"ad_id": ad_id, "text": text},
+                }
+                try:
+                    raw = await c.edit_ad(ad_id, fmt=fmt, text=text)
+                    entry["answer"] = {"ok": True, "status": raw.get("status"), "text": raw.get("text")}
+                except TelegramAdsError as e:
+                    entry["answer"] = {"ok": False, "error": e.error}
+                after = (await c.ads_by_id([ad_id])).get(ad_id) or {}
+                entry["read_back"] = {"status": after.get("status"), "text": after.get("text")}
+                entry["applied"] = str(after.get("text") or "").strip() == text.strip()
+                trace.append(entry)
+                if entry["applied"]:
+                    result = fmt
+                    break
+                if after.get("status") in actions.IN_REVIEW and before.get("status") not in actions.IN_REVIEW:
+                    # Accepted into review with the old text showing: another format would only re-send it.
+                    result = "pending"
+                    break
+            if result in FORMATS:
+                after, note = await actions.submit_if_ready(c, ad_id, after)
+    except TelegramAdsError as e:
+        raise AppError(f"آزمایش انجام نشد: {e.friendly}") from None
+    if isinstance(after, dict) and after:
+        row.text = str(after.get("text") or row.text)
+        row.status = str(after.get("status") or row.status)
+    cap = dict(await app_settings.get(s, CAP_KEY, None) or {})
+    if result != "pending":
+        cap["edit_format"] = result
+    cap["edit_probe"] = {"ts": now_ts(), "ad_id": ad_id, "result": result, "trace": trace}
+    cap["checked_ts"], cap["source"] = now_ts(), f"edit probe on ad {ad_id}"
+    await app_settings.put(s, CAP_KEY, cap)
+    events.log(
+        s,
+        "tg_edit_probe",
+        account_id=acc.id,
+        actor="user",
+        ad_id=ad_id,
+        detail=json.dumps(trace, ensure_ascii=False)[:2000],
+    )
+    messages = {
+        "json": "ویرایش با JSON اعمال شد (روش فعلی پنل).",
+        "form": "ویرایش با JSON اعمال نشد ولی با فرم (x-www-form-urlencoded) اعمال شد؛ از این به بعد ویرایش‌ها با فرم فرستاده می‌شوند.",
+        "query": "ویرایش فقط با پارامترهای آدرس (query string) اعمال شد؛ از این به بعد ویرایش‌ها این‌طور فرستاده می‌شوند.",
+        "pending": "تلگرام ویرایش را به بررسی فرستاد ولی تا تأیید متن قبلی را نشان می‌دهد؛ بعد از تأیید آگهی را دوباره ببینید.",
+        "none": "تلگرام با هیچ‌کدام از سه روش مستند، متن آگهی را عوض نکرد. " + EDIT_NOT_APPLIED,
+    }
+    return {"result": result, "message": messages[result] + (f" {note}" if note else ""), "trace": trace}
 
 
 async def set_capability(s: AsyncSession, name: str, value: str, source: str) -> None:
@@ -203,6 +294,14 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
 
     # Photo: in place only where the API is known (or being tested on one ad) to change a live ad's photo.
     photo_test = False
+    if mode == "inplace" and (text or per_ad or kind == "referral"):
+        if caps["edit_format"] == "none":
+            errors.append(EDIT_NOT_APPLIED)
+        elif caps["edit_format"] == "unknown":
+            warnings.append(
+                "هنوز آزمایش نشده که Telegram Ads API ویرایش متن/لینک آگهی موجود را اعمال می‌کند. اگر بعد از اجرا "
+                "خطای «عوض نشد» دیدید، در صفحه‌ی همان آگهی «آزمایش ویرایش» را بزنید یا حالت «جایگزینی» را انتخاب کنید."
+            )
     if photo_id and mode == "inplace":
         if caps["edit_photo"] == "no":
             errors.append(
@@ -768,9 +867,10 @@ def _create_params(op: BulkOperation, it: BulkItem, ad: Ad) -> dict[str, Any] | 
     if tgt is None:
         return None
     target, slot = tgt
-    title = re.sub(r"\s+", " ", f"{ad.title or ad.target_label or ad.ad_id}")[:100] + f" r{op.id}"
+    suffix = f" r{op.id}"
+    title = clip_bytes(re.sub(r"\s+", " ", f"{ad.title or ad.target_label or ad.ad_id}"), 128 - len(suffix)) + suffix
     params: dict[str, Any] = {
-        "title": title[:120],
+        "title": title,
         "text": it.params.get("text") or ad.text,
         "promote_url": it.params.get("promote_url") or ad.promote_url,
         "cpm": ad.cpm,
@@ -805,8 +905,19 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
                     s, "bulk_declined", account_id=acc.id, ad_id=cand.ad_id, level="warn", detail=it.decline_reason
                 )
             elif cand.status == "active":
-                it.status = "approved"
-                it.step = "pause" if op.mode == "replace" else "done"
+                expect = (it.params or {}).get("expect") or {}
+                missing = [k for k, v in expect.items() if str(getattr(cand, k) or "").strip() != str(v or "").strip()]
+                if op.mode == "inplace" and missing:
+                    # Approved, yet Telegram still has the old text or link: the edit did not stick.
+                    it.status = "failed"
+                    it.error = actions.not_applied_message(
+                        missing, {k: getattr(cand, k) for k in missing} | {"status": cand.status}, after_review=True
+                    )
+                else:
+                    it.status = "approved"
+                    it.step = "pause" if op.mode == "replace" else "done"
+                    if it.error and it.error.startswith("آگهی به بررسی تلگرام رفت"):
+                        it.error = ""
             elif cand.status == actions.READY:
                 # Saved by Telegram but not sent to its moderators (an ad without budget): send it, once.
                 if not any(j.kind == "submit_review" for j in await _jobs_of(s, it.id)):
