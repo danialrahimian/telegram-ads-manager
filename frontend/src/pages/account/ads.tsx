@@ -11,6 +11,7 @@ import {
   PlusIcon,
   RotateCcwIcon,
   SearchIcon,
+  SendIcon,
   SlidersHorizontalIcon,
   TagIcon,
   XIcon,
@@ -42,6 +43,7 @@ import { BulkDialog } from "@/components/bulk-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { useAccountCtx } from "@/components/layout/account-layout";
 import { QueryError } from "@/components/query-error";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -63,7 +65,8 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { headerState, toggleAll, toggleOne } from "@/lib/bulk";
 import { enDate, enMoney, enNum, enPct } from "@/lib/format-en";
-import { useAds, useTexts } from "@/lib/queries";
+import { api } from "@/lib/api";
+import { accountApi, keys, useAction, useAds, useTexts } from "@/lib/queries";
 import type { AdRow, BulkKind, TextVariant } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -71,6 +74,7 @@ const STATUS_VARIANT = {
   active: "success",
   on_hold: "warning",
   in_review: "info",
+  ready: "warning",
   declined: "destructive",
   stopped: "secondary",
 } as const;
@@ -240,6 +244,7 @@ export default function AdsPage() {
         )}
       </div>
 
+      {!f.archived && <ReadyForReview slug={account.slug} ads={data?.ads ?? []} />}
       {error && <QueryError error={error} retry={() => refetch()} />}
       {isLoading && <Skeleton className="h-96" />}
       {!isLoading && !error && rows.length === 0 && (
@@ -501,6 +506,33 @@ function SortHead({
         <Icon className={cn("size-3", !active && "opacity-40")} />
       </button>
     </TableHead>
+  );
+}
+
+/** Ads Telegram saved but never sent to its moderators ("ready_for_review"): they are not shown until sent. */
+function ReadyForReview({ slug, ads }: { slug: string; ads: AdRow[] }) {
+  const n = ads.filter((a) => a.status === "ready_for_review").length;
+  const send = useAction<void, { message: string }>({
+    fn: () => api.post(`${accountApi(slug)}/ads/submit-review`),
+    invalidate: [keys.acc(slug)],
+    success: (r) => r.message,
+  });
+  if (!n) return null;
+  return (
+    <Alert variant="warning" data-testid="ready-for-review">
+      <AlertTitle>
+        {enNum(n)} {n === 1 ? "ad is" : "ads are"} ready for review but not submitted
+      </AlertTitle>
+      <AlertDescription>
+        <p>
+          Telegram saved the changes but sends an ad to review by itself only when it has budget. Until it is
+          submitted, the ad keeps showing nothing new.
+        </p>
+        <Button size="sm" className="mt-1" onClick={() => send.mutate()} disabled={send.isPending}>
+          <SendIcon /> Submit {n === 1 ? "it" : `all ${enNum(n)}`} for review
+        </Button>
+      </AlertDescription>
+    </Alert>
   );
 }
 

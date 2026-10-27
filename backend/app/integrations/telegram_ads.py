@@ -170,6 +170,11 @@ class TelegramAdsClient:
     async def edit_ad(self, ad_id: int, **fields: Any) -> dict[str, Any]:
         return await self.call("editAd", ad_id=ad_id, return_target=True, **fields)
 
+    async def submit_for_review(self, ad_id: int) -> dict[str, Any]:
+        """submitAdForReview: Telegram leaves an edited or new ad with an empty budget as "ready_for_review"
+        (since September 2026) and does not send it to its moderators until this is called."""
+        return await self.call("submitAdForReview", ad_id=ad_id, return_target=True)
+
     async def withdraw(self, ad_id: int, amount: float, key: str | None = None) -> dict[str, Any]:
         return await self.call(
             "decreaseAdBudget", idempotency_key=key or str(uuid.uuid4()), ad_id=ad_id, amount=floor_amount(amount)

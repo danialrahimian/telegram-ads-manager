@@ -807,6 +807,11 @@ async def _advance_op(s: AsyncSession, acc: Account, op: BulkOperation, now: int
             elif cand.status == "active":
                 it.status = "approved"
                 it.step = "pause" if op.mode == "replace" else "done"
+            elif cand.status == actions.READY:
+                # Saved by Telegram but not sent to its moderators (an ad without budget): send it, once.
+                if not any(j.kind == "submit_review" for j in await _jobs_of(s, it.id)):
+                    actions.enqueue(s, acc, "submit_review", cand.ad_id, actor="bulk", bulk_item_id=it.id)
+                continue
             else:
                 continue
             it.updated_ts, changed = now, True

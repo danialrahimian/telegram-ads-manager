@@ -52,7 +52,7 @@ class SyncIn(StrictModel):
 
 
 class AdActionIn(StrictModel):
-    action: Literal["pause", "resume", "withdraw", "topup"]
+    action: Literal["pause", "resume", "withdraw", "topup", "submit_review"]
     amount: float | None = Field(None, ge=0)
 
 

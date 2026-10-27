@@ -30,6 +30,7 @@ JOB_LABEL = {
     "create_ad": "ساخت آگهی جایگزین",
     "edit_ad": "ویرایش آگهی",
     "delete_ad": "حذف آگهی",
+    "submit_review": "ارسال برای بررسی",
 }
 # Errors that will not change on a retry: the item fails at once instead of four attempts.
 FINAL_ERRORS = (
@@ -173,12 +174,41 @@ async def ad_action(s: AsyncSession, acc: Account, ad_id: int, action: str, amou
         return (
             f"آگهی متوقف می‌شود و حدود {max(1, get_settings().withdraw_delay_seconds // 60)} دقیقه بعد بودجه‌اش برمی‌گردد."
         )
+    if action == "submit_review":
+        if ad.status != READY:
+            raise AppError("این آگهی منتظر ارسال برای بررسی نیست.")
+        enqueue(s, acc, "submit_review", ad_id)
+        return "ارسال برای بررسی در صف رفت."
     if action == "topup":
         amt = round(float(amount or 0), 2)
         await check_topup(s, acc, amt)
         enqueue(s, acc, "topup", ad_id, amt)
         return f"شارژ {amt} در صف رفت."
     raise AppError("اقدام ناشناخته.")
+
+
+async def submit_all_ready(s: AsyncSession, acc: Account) -> int:
+    """Queue submitAdForReview for every ad Telegram keeps as "ready_for_review" (saved, never reviewed)."""
+    if acc.automation_paused:
+        raise AppError("اقدام‌های این حساب متوقف است.", code="automation_paused")
+    ids = list(
+        (
+            await s.execute(select(Ad.ad_id).where(Ad.account_id == acc.id, Ad.status == READY, Ad.archived.is_(False)))
+        ).scalars()
+    )
+    waiting = set(
+        (
+            await s.execute(
+                select(Job.ad_id).where(
+                    Job.account_id == acc.id, Job.kind == "submit_review", Job.status.in_(("queued", "running"))
+                )
+            )
+        ).scalars()
+    )
+    for ad_id in ids:
+        if ad_id not in waiting:
+            enqueue(s, acc, "submit_review", ad_id)
+    return len(ids)
 
 
 async def approve(s: AsyncSession, acc: Account, proposal_id: int, actor: str = "user") -> str | None:
@@ -316,6 +346,49 @@ async def _requeue(job_id: int, msg: str, delay: int, *, count_attempt: bool = T
             job.idem_key = str(uuid.uuid4())
 
 
+READY = "ready_for_review"
+FIELD_LABEL = {"text": "متن", "promote_url": "لینک", "photo_id": "عکس"}
+
+
+async def submit_if_ready(c: TelegramAdsClient, ad_id: int, raw: Any) -> tuple[Any, str]:
+    """Send an ad Telegram left as "ready_for_review" to its moderators.
+
+    Telegram submits a created or edited ad for review by itself only when the ad has budget; otherwise the
+    change is saved but nobody reviews it and it never shows. Returns (ad, error message or "").
+    """
+    if not isinstance(raw, dict) or raw.get("status") != READY:
+        return raw, ""
+    try:
+        return await c.submit_for_review(ad_id), ""
+    except TelegramAdsError as e:
+        return raw, (
+            f"تلگرام تغییر را ذخیره کرد ولی آگهی را برای بررسی نفرستاد ({e.friendly}). "
+            "آگهی بی‌بودجه خودکار بررسی نمی‌شود؛ بعد از شارژ، «ارسال برای بررسی» را بزنید."
+        )
+
+
+def unapplied(sent: dict[str, Any], raw: Any) -> list[str]:
+    """Fields Telegram answered "ok" to but did not store (compared with the Ad it returned)."""
+    if not isinstance(raw, dict):
+        return []
+    out: list[str] = []
+    for k in ("text", "promote_url"):
+        if k in sent and k in raw and str(raw.get(k) or "").strip() != str(sent[k] or "").strip():
+            out.append(k)
+    pic = raw.get("photo")
+    if sent.get("photo_id") and isinstance(pic, dict) and str(pic.get("photo_id") or "") != str(sent["photo_id"]):
+        out.append("photo_id")
+    return out
+
+
+def not_applied_message(fields: list[str]) -> str:
+    names = "، ".join(FIELD_LABEL.get(f, f) for f in fields)
+    return (
+        f"تلگرام درخواست را پذیرفت ولی {names} آگهی عوض نشد. "
+        "آگهی را در ads.telegram.org ببینید؛ اگر آنجا هم قدیمی است، دوباره امتحان کنید."
+    )
+
+
 async def _refresh_ad(c: TelegramAdsClient, account_id: int, ad_id: int, kind: str | None = None) -> dict | None:
     ad = (await c.ads_by_id([ad_id])).get(ad_id)
     if ad:
@@ -386,13 +459,25 @@ async def run_job(job: Job, c: TelegramAdsClient) -> None:
                 )
             return await _finish(job.id, "failed", f"موجودی حساب ({acct.get('remaining_budget')}) کافی نیست")
         await c.topup(aid, amount, key=job.idem_key)
-        await _refresh_ad(c, job.account_id, aid, "topup")
+        ad = await _refresh_ad(c, job.account_id, aid, "topup")
+        if isinstance(ad, dict) and ad.get("status") == READY:
+            await submit_if_ready(c, aid, ad)
+            await _refresh_ad(c, job.account_id, aid)
         await _store_balance(c, job.account_id)
         return await _finish(job.id, "done", f"{amount} شارژ شد")
     if kind == "create_ad":
         return await _run_create(job, c)
     if kind == "edit_ad":
         return await _run_edit(job, c)
+    if kind == "submit_review":
+        ad = await _refresh_ad(c, job.account_id, aid)
+        if not ad:
+            return await _finish(job.id, "failed", "آگهی پیدا نشد")
+        if ad.get("status") != READY:
+            return await _finish(job.id, "done", f"آگهی دیگر منتظر ارسال نیست ({ad.get('status')})")
+        await c.submit_for_review(aid)
+        await _refresh_ad(c, job.account_id, aid)
+        return await _finish(job.id, "done", "برای بررسی تلگرام فرستاده شد")
     if kind == "delete_ad":
         await c.delete_ad(aid)
         async with session_scope() as s:
@@ -423,6 +508,7 @@ async def _run_create(job: Job, c: TelegramAdsClient) -> None:
             job.id, "cancelled", f"موجودی حساب ({acct.get('remaining_budget')}) کافی نبود؛ آگهی به موج بعد رفت"
         )
     raw = await c.create_ad(job.idem_key, **params)
+    raw, submit_error = await submit_if_ready(c, int(raw.get("ad_id") or 0), raw)
     await _store_balance(c, job.account_id)
     async with session_scope() as s:
         it = await s.get(BulkItem, job.bulk_item_id) if job.bulk_item_id else None
@@ -430,6 +516,8 @@ async def _run_create(job: Job, c: TelegramAdsClient) -> None:
             ad = await bulk.store_created_ad(s, job.account_id, raw, params, it)
             it.new_ad_id = ad.ad_id
             it.status, it.updated_ts = "in_review", now_ts()
+            if submit_error:
+                it.error = submit_error
             events.log(
                 s, "create_ad", account_id=job.account_id, actor="bulk", ad_id=ad.ad_id, detail=f"جایگزین {job.ad_id}"
             )
@@ -448,35 +536,61 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
             async with session_scope() as s:
                 await bulk.set_capability(s, "edit_photo", "no", f"editAd: {e.error}")
         raise
+    raw, submit_error = await submit_if_ready(c, job.ad_id, raw)
+    missing = unapplied({k: v for k, v in params.items() if k != "photo_id"}, raw)
+    got: dict[str, Any] = raw if isinstance(raw, dict) else {}
     async with session_scope() as s:
         row = (
             await s.execute(select(Ad).where(Ad.account_id == job.account_id, Ad.ad_id == job.ad_id))
         ).scalar_one_or_none()
         it = await s.get(BulkItem, job.bulk_item_id) if job.bulk_item_id else None
         if photo:
-            got = raw.get("photo")
-            confirmed = isinstance(got, dict) and str(got.get("photo_id") or "") == str(photo)
+            pic = got.get("photo")
+            confirmed = isinstance(pic, dict) and str(pic.get("photo_id") or "") == str(photo)
             await bulk.set_capability(s, "edit_photo", "yes" if confirmed else "unknown", f"editAd on ad {job.ad_id}")
             if not confirmed and it is not None:
                 it.error = "تلگرام تغییر عکس را در پاسخ تأیید نکرد؛ عکس آگهی را در ads.telegram.org بررسی کنید."
         if row is not None:
-            row.text = str(raw.get("text") or params.get("text") or row.text)
-            row.promote_url = str(raw.get("promote_url") or params.get("promote_url") or row.promote_url)
+            # What Telegram answered is the truth; our own values only when the answer leaves a field out.
+            row.text = str(got["text"]) if "text" in got else str(params.get("text") or row.text)
+            row.promote_url = (
+                str(got["promote_url"]) if "promote_url" in got else str(params.get("promote_url") or row.promote_url)
+            )
             row.start_code = start_code_of(row.promote_url)
-            row.status = str(raw.get("status") or "in_review")
-            row.decline_reason = str((raw.get("decline_reason") or {}).get("text") or "")
-            if photo:
+            row.status = str(got.get("status") or "in_review")
+            row.decline_reason = str((got.get("decline_reason") or {}).get("text") or "")
+            if photo and isinstance(got.get("photo"), dict):
                 row.has_photo = True
-        if it is not None:
+        fail_msg = not_applied_message(missing) if missing else ""
+        if fail_msg:
+            if it is not None:
+                it.status, it.error, it.updated_ts = "failed", fail_msg, now_ts()
+            events.log(
+                s,
+                "edit_ad_failed",
+                account_id=job.account_id,
+                actor="worker",
+                ad_id=job.ad_id,
+                detail=fail_msg,
+                level="error",
+            )
+        elif it is not None:
             if row is not None:
                 if it.params.get("tag_id"):
                     row.tag_id = it.params["tag_id"]
                 if it.params.get("variant_id") and "text" in params:
                     row.variant_id = it.params["variant_id"]
             it.status, it.updated_ts = "in_review", now_ts()
-        events.log(
-            s, "edit_ad", account_id=job.account_id, actor="bulk", ad_id=job.ad_id, detail=", ".join(sorted(params))
-        )
+            if submit_error:
+                it.error = submit_error
+        if not fail_msg:
+            events.log(
+                s, "edit_ad", account_id=job.account_id, actor="bulk", ad_id=job.ad_id, detail=", ".join(sorted(params))
+            )
+    if fail_msg:
+        return await _finish(job.id, "failed", fail_msg)
+    if submit_error:
+        return await _finish(job.id, "done", submit_error)
     return await _finish(job.id, "done", "تغییر فرستاده شد؛ آگهی دوباره بررسی می‌شود")
 
 

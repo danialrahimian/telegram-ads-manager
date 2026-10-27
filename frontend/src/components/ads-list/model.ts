@@ -2,11 +2,12 @@
 import { ratio } from "@/lib/format-en";
 import type { AdRow } from "@/lib/types";
 
-export type StatusKey = "active" | "on_hold" | "in_review" | "declined" | "stopped";
+export type StatusKey = "active" | "on_hold" | "in_review" | "ready" | "declined" | "stopped";
 export const STATUS_LABEL: Record<StatusKey, string> = {
   active: "Active",
   on_hold: "On Hold",
   in_review: "In Review",
+  ready: "Ready for Review",
   declined: "Declined",
   stopped: "Stopped",
 };
@@ -15,7 +16,9 @@ export const STATUS_KEYS = Object.keys(STATUS_LABEL) as StatusKey[];
 /** Telegram Ads wording: a paused active ad is "On Hold". */
 export function statusKey(a: Pick<AdRow, "status" | "is_paused">): StatusKey {
   if (a.status === "declined") return "declined";
-  if (a.status === "in_review" || a.status === "ready_for_review") return "in_review";
+  if (a.status === "in_review") return "in_review";
+  // Saved on Telegram but not sent to review (an ad without budget is not sent by itself).
+  if (a.status === "ready_for_review") return "ready";
   if (a.status === "stopped") return "stopped";
   if (a.status === "on_hold" || (a.status === "active" && a.is_paused)) return "on_hold";
   return a.status === "active" ? "active" : "stopped";

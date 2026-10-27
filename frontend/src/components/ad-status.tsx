@@ -3,7 +3,7 @@ import { Badge } from "@/components/ui/badge";
 const MAP: Record<string, { label: string; variant: "success" | "warning" | "destructive" | "secondary" | "info" }> = {
   active: { label: "در حال اجرا", variant: "success" },
   in_review: { label: "در بررسی", variant: "info" },
-  ready_for_review: { label: "آماده‌ی بررسی", variant: "info" },
+  ready_for_review: { label: "ارسال‌نشده برای بررسی", variant: "warning" },
   declined: { label: "رد شده", variant: "destructive" },
   stopped: { label: "متوقف", variant: "secondary" },
   on_hold: { label: "معلق", variant: "warning" },
