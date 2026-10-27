@@ -267,6 +267,7 @@ class TgAdsApi:
     ignores_edits: bool
     ignored_formats: set[str]
     edits_wait_for_review: bool
+    edits_need_pause: bool
     in_progress_keys: set[str]
 
     # -------------------------------------------------------------- entry point
@@ -921,6 +922,10 @@ class TgAdsApi:
         if "photo_id" in p and self.supports_photo_edit and _given(p, "photo_id"):
             self._photo_ok(acc, str(p["photo_id"]), "photo")
         a = self._ad(acc, p)
+        if self.edits_need_pause and a["status"] == "active" and not a.get("is_paused"):
+            # Text, link and media of a running ad are ignored (the title is not reviewed and is stored).
+            p = {k: v for k, v in p.items() if k not in {"text", "photo_id", "video_id", "promote_url", "website_name",
+                                                          "website_photo_id", "button", "additional_info"}}  # fmt: skip
         if self.ignores_edits or fmt in self.ignored_formats:
             # "ok" but the content is not stored: a real-API failure the panel must notice.
             content = {"title", "text", "photo_id", "video_id", "promote_url", "website_name", "website_photo_id",

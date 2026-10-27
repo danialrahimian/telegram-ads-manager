@@ -18,9 +18,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { accountApi, keys, useAction } from "@/lib/queries";
-import type { Account, AdRow, EditProbeResult } from "@/lib/types";
+import type { Account, AdRow, Capabilities, EditProbeResult } from "@/lib/types";
 
-export const EDIT_FORMAT_LABEL: Record<string, string> = {
+const EDIT_FORMAT_LABEL: Record<string, string> = {
   json: "JSON",
   form: "فرم (x-www-form-urlencoded)",
   query: "پارامتر آدرس (query string)",
@@ -28,14 +28,28 @@ export const EDIT_FORMAT_LABEL: Record<string, string> = {
   unknown: "آزمایش نشده",
 };
 
+export function editFormatLabel(caps?: Pick<Capabilities, "edit_format" | "edit_pause">): string {
+  if (caps?.edit_format === "none" && caps.edit_pause === "yes") return "با توقف چندثانیه‌ای آگهی";
+  return EDIT_FORMAT_LABEL[caps?.edit_format ?? "unknown"];
+}
+
+const STEP_LABEL = { format: "", title: "آزمایش عنوان (برگردانده شد)", pause: "توقف ← ویرایش ← فعال‌سازی" } as const;
+
 /** Edits this ad's text for real in each documented request format until Telegram stores it. */
 export function EditProbe({ account, ad }: { account: Account; ad: AdRow }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(ad.text);
   const [sure, setSure] = useState(false);
+  const [allowPause, setAllowPause] = useState(false);
   const [result, setResult] = useState<EditProbeResult | null>(null);
   const run = useAction<void, EditProbeResult>({
-    fn: () => api.post(`${accountApi(account.slug)}/bulk/edit-probe`, { ad_id: ad.ad_id, text, confirm: true }),
+    fn: () =>
+      api.post(`${accountApi(account.slug)}/bulk/edit-probe`, {
+        ad_id: ad.ad_id,
+        text,
+        confirm: true,
+        allow_pause: allowPause,
+      }),
     invalidate: [keys.acc(account.slug)],
     success: (r) => r.message,
     onSuccess: (r) => setResult(r),
@@ -67,6 +81,22 @@ export function EditProbe({ account, ad }: { account: Account; ad: AdRow }) {
                   می‌دانم متن این آگهی در تلگرام واقعاً عوض می‌شود و آگهی دوباره بررسی می‌شود.
                 </Label>
               </div>
+              <div className="flex items-start gap-2">
+                <Checkbox
+                  id="probe-pause"
+                  checked={allowPause}
+                  onCheckedChange={(v) => setAllowPause(v === true)}
+                  className="mt-0.5"
+                />
+                <Label htmlFor="probe-pause" className="leading-relaxed">
+                  اگر هیچ روشی کار نکرد، آگهی را چند ثانیه متوقف کن، ویرایش کن و دوباره فعال کن (بعضی آگهی‌ها فقط وقتی
+                  متوقف‌اند ویرایش می‌شوند).
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                اگر هیچ روشی کار نکند، عنوان آگهی (که مخاطب نمی‌بیند و به بررسی نمی‌رود) یک بار عوض و بلافاصله برگردانده
+                می‌شود تا معلوم شود API اصلاً تغییری روی این آگهی ذخیره می‌کند یا نه.
+              </p>
             </div>
           ) : (
             <ProbeTrace result={result} />
@@ -94,9 +124,10 @@ export function ProbeTrace({ result }: { result: EditProbeResult }) {
       <Alert variant={result.result === "none" ? "destructive" : result.result === "pending" ? "info" : "success"}>
         <AlertDescription>{result.message}</AlertDescription>
       </Alert>
-      {result.trace.map((t) => (
-        <div key={t.format} className="min-w-0 space-y-1 rounded-lg border p-2 text-xs">
+      {result.trace.map((t, i) => (
+        <div key={i} className="min-w-0 space-y-1 rounded-lg border p-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
+            {t.kind && t.kind !== "format" && <Badge variant="info">{STEP_LABEL[t.kind]}</Badge>}
             <Badge variant="outline" className="ltr">
               {t.content_type}
             </Badge>
@@ -107,7 +138,8 @@ export function ProbeTrace({ result }: { result: EditProbeResult }) {
             <span className="ltr">{t.answer.ok ? `ok · status=${t.answer.status ?? "—"}` : `error=${t.answer.error}`}</span>
           </div>
           <div className="wrap-anywhere">
-            متن خوانده‌شده بعد از ویرایش: <span dir="auto">«{t.read_back.text ?? "—"}»</span>{" "}
+            {t.kind === "title" ? "عنوان" : "متن"} خوانده‌شده بعد از ویرایش:{" "}
+            <span dir="auto">«{(t.kind === "title" ? t.read_back.title : t.read_back.text) ?? "—"}»</span>{" "}
             <span className="ltr text-muted-foreground">({t.read_back.status ?? "—"})</span>
           </div>
         </div>

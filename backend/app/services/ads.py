@@ -201,11 +201,11 @@ async def edit(s: AsyncSession, acc: Account, ad_id: int, data: dict[str, Any]) 
         from app.services import bulk
 
         cap = await bulk.capabilities(s)
-        if cap["edit_format"] == "none":
+        if bulk.edits_blocked(cap):
             raise AppError(bulk.EDIT_NOT_APPLIED)
         try:
             async with accounts.tg_client(acc) as c:
-                raw = await c.edit_ad(ad_id, fmt=bulk.edit_format(cap), **remote)
+                raw = await actions.edit_content(c, ad_id, cap, **remote)
                 raw, review_note = await actions.submit_if_ready(c, ad_id, raw)
         except TelegramAdsError as e:
             raise UpstreamError(f"تلگرام تغییر را نپذیرفت: {e.friendly}") from None

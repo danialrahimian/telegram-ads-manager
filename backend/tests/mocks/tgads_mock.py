@@ -73,7 +73,9 @@ class TgAdsMock(TgAdsApi):
         self.drops_pending = False
         # Request formats (json, form, query, multipart) whose editAd content Telegram ignores (edit probe tests).
         self.ignored_formats: set[str] = set()
-        self.in_progress_keys: set[str] = set()  # idempotency keys "still running" (IDEMPOTENT_REQUEST_IN_PROGRESS)
+        self.in_progress_keys: set[str] = set()
+        # Text/link edits of an active, not paused ad are ignored (applied once the ad is paused).
+        self.edits_need_pause = False  # idempotency keys "still running" (IDEMPOTENT_REQUEST_IN_PROGRESS)
         self.lock = threading.Lock()
         self.accounts: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []

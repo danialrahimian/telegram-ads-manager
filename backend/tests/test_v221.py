@@ -197,7 +197,7 @@ async def test_edit_probe_when_no_format_works_steers_to_replacement(api, tg_moc
     await _setup(api, tg_mock)
     tg_mock.ignores_edits = True
     out = (await api.post(f"{A}/bulk/edit-probe", json={"ad_id": 3, "text": TEXT, "confirm": True})).json()
-    assert out["result"] == "none" and len(out["trace"]) == 3 and "جایگزینی" in out["message"]
+    assert out["result"] == "none" and len(out["trace"]) == 4 and "جایگزینی" in out["message"]  # 3 formats + title
     p = (
         await api.post(f"{A}/bulk/preview", json={"kind": "content", "ad_ids": [3], "mode": "inplace", "text": TEXT})
     ).json()
@@ -258,3 +258,58 @@ def test_which_errors_get_a_new_key():
     assert not answered_error(TelegramAdsError("createAd", "network error: ConnectTimeout"))
     assert not answered_error(TelegramAdsError("createAd", "HTTP 502", 502))
     assert not answered_error(TelegramAdsError("createAd", "IDEMPOTENT_REQUEST_IN_PROGRESS"))
+
+
+async def test_edit_probe_pause_check_and_edits_that_pause_first(api, tg_mock):
+    """The real account: the website takes the edit, the API ignores it on a running ad."""
+    await _setup(api, tg_mock)
+    tg_mock.edits_need_pause = True
+    out = (await api.post(f"{A}/bulk/edit-probe", json={"ad_id": 3, "text": TEXT, "confirm": True})).json()
+    assert out["result"] == "none" and out["title_stored"] is True
+    assert [t.get("kind", "format") for t in out["trace"]] == ["format", "format", "format", "title"]
+    assert "عنوان آگهی ذخیره شد" in out["message"]
+    assert tg_mock.accounts["a"]["ads"][3]["title"] == "good_plenty"  # put back
+
+    out = (
+        await api.post(f"{A}/bulk/edit-probe", json={"ad_id": 3, "text": TEXT, "confirm": True, "allow_pause": True})
+    ).json()
+    assert out["result"] == "pause" and out["trace"][-1]["kind"] == "pause" and out["trace"][-1]["applied"]
+    ad = tg_mock.accounts["a"]["ads"][3]
+    assert ad["text"] == TEXT and not ad["is_paused"]  # resumed
+    caps = (await api.get(f"{A}/bulk/capabilities")).json()
+    assert caps["edit_format"] == "none" and caps["edit_pause"] == "yes"
+
+    # From now on in-place edits pause the ad for a moment and stick.
+    p = (
+        await api.post(f"{A}/bulk/preview", json={"kind": "content", "ad_ids": [4], "mode": "inplace", "text": TEXT})
+    ).json()
+    assert p["errors"] == [] and any("متوقف، ویرایش و دوباره" in w for w in p["warnings"])
+    tg_mock.review("a")
+    op = (
+        await api.post(
+            f"{A}/bulk",
+            json={"kind": "content", "ad_ids": [4, 8], "mode": "inplace", "text": TEXT + "!", "confirm": True},
+        )
+    ).json()
+    await _drain()
+    for ad_id in (4, 8):
+        ad = tg_mock.accounts["a"]["ads"][ad_id]
+        assert ad["text"] == TEXT + "!" and not ad.get("is_paused") and ad["status"] == "in_review"
+    assert {i.status for i in await _items(op["id"])} == {"in_review"}
+    r = await api.patch(f"{A}/ads/5", json={"text": TEXT + "؟"})
+    assert r.status_code == 200 and tg_mock.accounts["a"]["ads"][5]["text"] == TEXT + "؟"
+
+
+async def test_edit_probe_when_the_api_stores_nothing(api, tg_mock):
+    await _setup(api, tg_mock)
+    tg_mock.ignores_edits = True
+    out = (
+        await api.post(f"{A}/bulk/edit-probe", json={"ad_id": 3, "text": TEXT, "confirm": True, "allow_pause": True})
+    ).json()
+    assert out["result"] == "none" and out["title_stored"] is False
+    assert "حتی عنوان" in out["message"] and "جایگزینی" in out["message"]
+    assert not tg_mock.accounts["a"]["ads"][3].get("is_paused")  # resumed after the pause check
+    caps = (await api.get(f"{A}/bulk/capabilities")).json()
+    assert caps["edit_format"] == "none" and caps["edit_pause"] == "no"
+    r = await api.patch(f"{A}/ads/3", json={"text": TEXT})
+    assert r.status_code == 400

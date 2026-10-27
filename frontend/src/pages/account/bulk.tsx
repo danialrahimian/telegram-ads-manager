@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { ConfirmButton } from "@/components/confirm-button";
 import { EmptyState } from "@/components/empty-state";
-import { EDIT_FORMAT_LABEL } from "@/components/edit-probe";
+import { editFormatLabel } from "@/components/edit-probe";
 import { useAccountCtx } from "@/components/layout/account-layout";
 import { PageHeader } from "@/components/page-header";
 import { QueryError } from "@/components/query-error";
@@ -58,10 +58,16 @@ function CapabilityNote({ account, caps }: { account: Account; caps?: Capabiliti
           <div>
             ویرایش متن/لینک آگهی موجود:{" "}
             <Badge
-              variant={caps?.edit_format === "none" ? "destructive" : caps?.edit_format && caps.edit_format !== "unknown" ? "success" : "secondary"}
+              variant={
+                caps?.edit_format === "none" && caps.edit_pause !== "yes"
+                  ? "destructive"
+                  : caps?.edit_format && caps.edit_format !== "unknown"
+                    ? "success"
+                    : "secondary"
+              }
               data-testid="edit-format"
             >
-              {EDIT_FORMAT_LABEL[caps?.edit_format ?? "unknown"]}
+              {editFormatLabel(caps)}
             </Badge>
           </div>
           {caps?.edit_format === "unknown" && (

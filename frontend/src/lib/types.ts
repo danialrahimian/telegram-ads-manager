@@ -442,18 +442,21 @@ export interface BotCheck {
 export type Capability = "yes" | "no" | "unknown";
 
 export interface EditProbeStep {
+  /** "format": one request format; "title": title changed and put back; "pause": paused, edited, resumed. */
+  kind?: "format" | "title" | "pause";
   format: "json" | "form" | "query";
   content_type: string;
-  sent: { ad_id: number; text: string };
-  answer: { ok: boolean; status?: string; text?: string; error?: string };
-  read_back: { status?: string; text?: string };
+  sent: { ad_id: number; text?: string; title?: string };
+  answer: { ok: boolean; status?: string; text?: string; title?: string; error?: string };
+  read_back: { status?: string; text?: string; title?: string; is_paused?: boolean };
   applied: boolean;
 }
 
 export interface EditProbeResult {
-  result: "json" | "form" | "query" | "none" | "pending";
+  result: "json" | "form" | "query" | "none" | "pending" | "pause";
   message: string;
   trace: EditProbeStep[];
+  title_stored?: boolean | null;
 }
 
 export interface Capabilities {
@@ -461,6 +464,8 @@ export interface Capabilities {
   edit_photo: Capability;
   /** How text/link edits are sent; "none" = Telegram applied no format (use replacement). */
   edit_format: "json" | "form" | "query" | "none" | "unknown";
+  /** "yes": text edits are applied only to a paused ad, so in-place edits pause it for a moment. */
+  edit_pause: "yes" | "no" | "unknown";
   edit_probe: { ts: number; ad_id: number; result: EditProbeResult["result"]; trace: EditProbeStep[] } | null;
   checked_ts: number;
   source: string;
