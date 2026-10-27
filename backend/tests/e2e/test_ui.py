@@ -627,6 +627,17 @@ def test_edit_probe_finds_the_request_format_telegram_applies(page, stack: Stack
     expect(page.get_by_test_id("edit-format")).to_have_text(re.compile("فرم"))
 
 
+def test_replace_this_ad_from_its_page(page, shot):
+    _nav(page, "/accounts/psychonet/ads/1")
+    page.get_by_role("button", name="جایگزینی همین آگهی").click()
+    dlg = page.get_by_role("dialog")
+    expect(dlg.get_by_role("radio", name=re.compile("جایگزینی \\(پیش‌فرض\\)"))).to_have_attribute("aria-checked", "true")
+    expect(dlg.get_by_label("متن تازه (خالی = متن فعلی بماند)")).to_be_visible()
+    shot(page, "29-replace-this-ad")
+    page.keyboard.press("Escape")
+    expect(page.get_by_role("dialog")).to_have_count(0)
+
+
 OVERFLOW_JS = r"""
 () => {
   // Elements that stick out of the page content area (or the screen), ignoring horizontally scrollable boxes.

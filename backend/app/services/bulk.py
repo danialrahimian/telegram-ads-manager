@@ -83,6 +83,9 @@ async def capabilities(s: AsyncSession) -> dict[str, Any]:
         # How editAd text/link changes must be sent: "json" | "form" | "query" (found by probe_edit),
         # "none" (Telegram applied none of them), "unknown" (not tested yet; JSON is sent).
         "edit_format": cap.get("edit_format", "unknown"),
+        # "yes": Telegram ignores text/link edits of an active ad but applies them to a paused one, so in-place
+        # edits pause the ad for a moment, edit and resume it (found by probe_edit with allow_pause).
+        "edit_pause": cap.get("edit_pause", "unknown"),
         "edit_probe": cap.get("edit_probe"),
         "checked_ts": cap.get("checked_ts", 0),
         "source": cap.get("source", ""),
@@ -93,6 +96,11 @@ def edit_format(cap: dict[str, Any]) -> str:
     return cap["edit_format"] if cap.get("edit_format") in FORMATS else "json"
 
 
+def edits_blocked(cap: dict[str, Any]) -> bool:
+    """In-place text/link edits cannot work: no format applied them and pausing first did not help either."""
+    return cap.get("edit_format") == "none" and cap.get("edit_pause") != "yes"
+
+
 EDIT_NOT_APPLIED = (
     "آزمایش ویرایش نشان داد Telegram Ads API تغییر متن و لینک آگهی موجود را اعمال نمی‌کند؛ "
     "حالت «جایگزینی» را انتخاب کنید (آگهی تازه با متن جدید ساخته می‌شود)."
@@ -100,12 +108,17 @@ EDIT_NOT_APPLIED = (
 CONTENT_TYPE = {"json": "application/json", "form": "application/x-www-form-urlencoded", "query": "GET ?query"}
 
 
-async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str) -> dict[str, Any]:
+async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str, allow_pause: bool = False) -> dict[str, Any]:
     """Edit one ad's text for real, in each documented request format, until Telegram stores it.
 
     For an ad that stayed "active" with its old text after editAd answered ok. Each try is read back with
     getAdsById; the first format whose text sticks is remembered and used for every later edit. The whole
     trace (no token) is kept for the bot developer / us. Only run after the user confirmed it.
+
+    When no format works, two more checks tell why: the title (never shown to the audience, no review) is
+    changed and put back — does editAd store anything at all on this ad? — and, with `allow_pause`, the ad is
+    paused, edited and resumed: some ads take a text edit only while paused, which the panel can then do for
+    every in-place edit.
     """
     from app.services.ads import validate_text
 
@@ -115,6 +128,7 @@ async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str) -> di
         raise NotFound("این آگهی پیدا نشد.")
     trace: list[dict[str, Any]] = []
     result, note = "none", ""
+    title_stored: bool | None = None
     try:
         async with accounts.tg_client(acc) as c:
             before = (await c.ads_by_id([ad_id])).get(ad_id)
@@ -145,7 +159,13 @@ async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str) -> di
                     # Accepted into review with the old text showing: another format would only re-send it.
                     result = "pending"
                     break
-            if result in FORMATS:
+            if result == "none":
+                title_stored = await _probe_title(c, ad_id, str(before.get("title") or ""), trace)
+                if allow_pause:
+                    if await _probe_pause(c, ad_id, text, before, trace):
+                        result = "pause"
+                    after = (await c.ads_by_id([ad_id])).get(ad_id) or after
+            if result in FORMATS or result == "pause":
                 after, note = await actions.submit_if_ready(c, ad_id, after)
     except TelegramAdsError as e:
         raise AppError(f"آزمایش انجام نشد: {e.friendly}") from None
@@ -153,8 +173,12 @@ async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str) -> di
         row.text = str(after.get("text") or row.text)
         row.status = str(after.get("status") or row.status)
     cap = dict(await app_settings.get(s, CAP_KEY, None) or {})
-    if result != "pending":
-        cap["edit_format"] = result
+    if result in FORMATS:
+        cap["edit_format"], cap["edit_pause"] = result, "unknown"
+    elif result in ("none", "pause"):
+        cap["edit_format"] = "none"
+        if allow_pause:
+            cap["edit_pause"] = "yes" if result == "pause" else "no"
     cap["edit_probe"] = {"ts": now_ts(), "ad_id": ad_id, "result": result, "trace": trace}
     cap["checked_ts"], cap["source"] = now_ts(), f"edit probe on ad {ad_id}"
     await app_settings.put(s, CAP_KEY, cap)
@@ -171,9 +195,84 @@ async def probe_edit(s: AsyncSession, acc: Account, ad_id: int, text: str) -> di
         "form": "ویرایش با JSON اعمال نشد ولی با فرم (x-www-form-urlencoded) اعمال شد؛ از این به بعد ویرایش‌ها با فرم فرستاده می‌شوند.",
         "query": "ویرایش فقط با پارامترهای آدرس (query string) اعمال شد؛ از این به بعد ویرایش‌ها این‌طور فرستاده می‌شوند.",
         "pending": "تلگرام ویرایش را به بررسی فرستاد ولی تا تأیید متن قبلی را نشان می‌دهد؛ بعد از تأیید آگهی را دوباره ببینید.",
-        "none": "تلگرام با هیچ‌کدام از سه روش مستند، متن آگهی را عوض نکرد. " + EDIT_NOT_APPLIED,
+        "pause": (
+            "تلگرام ویرایش متن آگهیِ فعال را نادیده می‌گیرد ولی روی آگهیِ متوقف اعمال می‌کند. از این به بعد پنل برای "
+            "ویرایش در جا، آگهی را چند ثانیه متوقف، ویرایش و دوباره فعال می‌کند."
+        ),
+        "none": "تلگرام با هیچ‌کدام از سه روش مستند، متن آگهی را عوض نکرد"
+        + ("، حتی وقتی آگهی متوقف بود" if allow_pause else "")
+        + ". "
+        + (
+            "عنوان آگهی ذخیره شد، پس API به این آگهی دسترسی دارد ولی متن را عوض نمی‌کند. "
+            if title_stored
+            else "API حتی عنوان آگهی را هم ذخیره نکرد؛ یعنی هیچ تغییری روی این آگهی نمی‌پذیرد (ممکن است فقط آگهی‌هایی "
+            "را ویرایش کند که با API ساخته شده‌اند؛ آزمایش را روی یک آگهیِ جایگزینی که پنل ساخته تکرار کنید). "
+            if title_stored is False
+            else ""
+        )
+        + EDIT_NOT_APPLIED,
     }
-    return {"result": result, "message": messages[result] + (f" {note}" if note else ""), "trace": trace}
+    return {
+        "result": result,
+        "message": messages[result] + (f" {note}" if note else ""),
+        "trace": trace,
+        "title_stored": title_stored,
+    }
+
+
+async def _probe_title(c: Any, ad_id: int, old: str, trace: list[dict[str, Any]]) -> bool | None:
+    """Change the title (no review, not shown to users) and put it back: does editAd store anything here?"""
+    test = clip_bytes(old, 124) + " ·" if old else "probe ·"
+    entry: dict[str, Any] = {
+        "kind": "title",
+        "format": "json",
+        "content_type": CONTENT_TYPE["json"],
+        "sent": {"ad_id": ad_id, "title": test},
+    }
+    try:
+        raw = await c.edit_ad(ad_id, title=test)
+        entry["answer"] = {"ok": True, "status": raw.get("status"), "title": raw.get("title")}
+    except TelegramAdsError as e:
+        entry["answer"] = {"ok": False, "error": e.error}
+    got = (await c.ads_by_id([ad_id])).get(ad_id) or {}
+    entry["read_back"] = {"status": got.get("status"), "title": got.get("title")}
+    entry["applied"] = got.get("title") == test
+    trace.append(entry)
+    if entry["applied"] and old:
+        try:
+            await c.edit_ad(ad_id, title=old)
+        except TelegramAdsError as e:
+            entry["restore_error"] = e.error
+    return bool(entry["applied"]) if entry["answer"]["ok"] else None
+
+
+async def _probe_pause(c: Any, ad_id: int, text: str, before: dict[str, Any], trace: list[dict[str, Any]]) -> bool:
+    """Pause, edit the text, resume (only if it was running): does Telegram take a text edit on a paused ad?"""
+    entry: dict[str, Any] = {
+        "kind": "pause",
+        "format": "json",
+        "content_type": CONTENT_TYPE["json"],
+        "sent": {"ad_id": ad_id, "text": text},
+    }
+    running = before.get("status") == "active" and not before.get("is_paused")
+    try:
+        if running:
+            await c.set_paused(ad_id, True)
+        raw = await c.edit_ad(ad_id, text=text)
+        entry["answer"] = {"ok": True, "status": raw.get("status"), "text": raw.get("text")}
+    except TelegramAdsError as e:
+        entry["answer"] = {"ok": False, "error": e.error}
+    finally:
+        if running:
+            try:
+                await c.set_paused(ad_id, False)
+            except TelegramAdsError as e:
+                entry["resume_error"] = e.error
+    got = (await c.ads_by_id([ad_id])).get(ad_id) or {}
+    entry["read_back"] = {"status": got.get("status"), "text": got.get("text"), "is_paused": got.get("is_paused")}
+    entry["applied"] = str(got.get("text") or "").strip() == text.strip()
+    trace.append(entry)
+    return bool(entry["applied"])
 
 
 async def set_capability(s: AsyncSession, name: str, value: str, source: str) -> None:
@@ -295,8 +394,13 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
     # Photo: in place only where the API is known (or being tested on one ad) to change a live ad's photo.
     photo_test = False
     if mode == "inplace" and (text or per_ad or kind == "referral"):
-        if caps["edit_format"] == "none":
+        if edits_blocked(caps):
             errors.append(EDIT_NOT_APPLIED)
+        elif caps["edit_pause"] == "yes":
+            warnings.append(
+                "تلگرام متن آگهیِ فعال را فقط وقتی آگهی متوقف است عوض می‌کند؛ هر آگهی چند ثانیه متوقف، ویرایش و دوباره "
+                "فعال می‌شود."
+            )
         elif caps["edit_format"] == "unknown":
             warnings.append(
                 "هنوز آزمایش نشده که Telegram Ads API ویرایش متن/لینک آگهی موجود را اعمال می‌کند. اگر بعد از اجرا "

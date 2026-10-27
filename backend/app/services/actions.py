@@ -359,6 +359,27 @@ async def _requeue(job_id: int, msg: str, delay: int, *, count_attempt: bool = T
 
 
 READY = "ready_for_review"
+
+
+async def edit_content(c: TelegramAdsClient, ad_id: int, cap: dict[str, Any], **params: Any) -> Any:
+    """editAd for text/link/photo, the way the edit probe found Telegram applies it (format; pause first)."""
+    from app.services import bulk
+
+    fmt = bulk.edit_format(cap)
+    if cap.get("edit_pause") != "yes":
+        return await c.edit_ad(ad_id, fmt=fmt, **params)
+    cur = (await c.ads_by_id([ad_id])).get(ad_id) or {}
+    running = cur.get("status") == "active" and not cur.get("is_paused")
+    if running:
+        await c.set_paused(ad_id, True)
+    try:
+        raw = await c.edit_ad(ad_id, fmt=fmt, **params)
+    finally:
+        if running:
+            await c.set_paused(ad_id, False)
+    return (await c.ads_by_id([ad_id])).get(ad_id) or raw
+
+
 FIELD_LABEL = {"text": "متن", "promote_url": "لینک", "photo_id": "عکس"}
 
 
@@ -569,9 +590,9 @@ async def _run_edit(job: Job, c: TelegramAdsClient) -> None:
     params = {k: v for k, v in (job.params or {}).items() if k in ("text", "promote_url", "photo_id")}
     photo = params.get("photo_id")
     async with session_scope() as s:
-        fmt = bulk.edit_format(await bulk.capabilities(s))
+        cap = await bulk.capabilities(s)
     try:
-        raw = await c.edit_ad(job.ad_id, fmt=fmt, **params)
+        raw = await edit_content(c, job.ad_id, cap, **params)
     except TelegramAdsError as e:
         if photo and "PHOTO" in e.error.upper():
             async with session_scope() as s:

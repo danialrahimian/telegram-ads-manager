@@ -1,7 +1,17 @@
-import { ArchiveIcon, ArrowRightIcon, ExternalLinkIcon, LayersIcon, PencilIcon, TagIcon, WalletIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArrowRightIcon,
+  ExternalLinkIcon,
+  LayersIcon,
+  PencilIcon,
+  RefreshCwIcon,
+  TagIcon,
+  WalletIcon,
+} from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { AdActions } from "@/components/ad-actions";
+import { BulkDialog } from "@/components/bulk-dialog";
 import { AdStatusBadge, placementLabel } from "@/components/ad-status";
 import { CopyButton } from "@/components/copy-button";
 import { EditProbe } from "@/components/edit-probe";
@@ -67,6 +77,7 @@ export default function AdDetailPage() {
   const adId = Number(useParams().adId);
   const { data, isLoading, error, refetch } = useAd(account.slug, adId);
   const [editing, setEditing] = useState(false);
+  const [replacing, setReplacing] = useState(false);
   const cur = account.telegram.currency;
 
   if (isLoading) return <Skeleton className="h-96" />;
@@ -215,7 +226,16 @@ export default function AdDetailPage() {
               {ad.start_code && <Badge variant="outline" className="ltr">start={ad.start_code}</Badge>}
             </div>
             {ad.note && <p className="text-xs text-muted-foreground">یادداشت: {ad.note}</p>}
-            <EditProbe account={account} ad={ad} />
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => setReplacing(true)}>
+                <RefreshCwIcon /> جایگزینی همین آگهی
+              </Button>
+              <EditProbe account={account} ad={ad} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              «جایگزینی» آگهی تازه‌ای با متن یا عکس جدید و همان جایگاه و CPM می‌سازد؛ بعد از تأیید تلگرام، این آگهی متوقف و
+              بودجه‌اش منتقل می‌شود. وقتی API ویرایش این آگهی را قبول نمی‌کند، همین راه کار می‌کند.
+            </p>
           </CardContent>
         </Card>
 
@@ -282,6 +302,22 @@ export default function AdDetailPage() {
         </CardContent>
       </Card>
 
+      {replacing && (
+        <BulkDialog
+          account={account}
+          kind="content"
+          targets={[
+            {
+              ad_id: ad.ad_id,
+              label: ad.target_label || ad.title || `#${ad.ad_id}`,
+              text: ad.text,
+              placement: ad.placement,
+              target_type: ad.target_type,
+            },
+          ]}
+          onClose={() => setReplacing(false)}
+        />
+      )}
       {editing && <EditAdDialog ad={ad} onClose={() => setEditing(false)} />}
     </div>
   );

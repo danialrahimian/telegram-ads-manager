@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.2.3 — why Telegram ignores an edit, and editing paused ads
+
+- On the real account the edit test showed that none of the three request formats changes the text, while ads.telegram.org accepts the same edit. The test now goes further when no format works:
+  - it changes the ad's title (never shown to users, not reviewed) and puts it back, to tell an API that stores nothing on the ad from one that refuses only the text;
+  - with an extra confirmation, it pauses the ad, edits the text and resumes it. If Telegram takes the edit on a paused ad, every later in-place edit (bulk and direct) does the same, pausing each ad only for the moment of the edit.
+- "جایگزینی همین آگهی" on the ad page opens the replacement dialog for that one ad (a new ad with the new text or photo, same placement and CPM), the way that works when the API will not edit the ad.
+
 ## v2.2.2 — edits Telegram did not apply, and the whole Ads API under test
 
 **Edits that Telegram answered "ok" to but did not store**

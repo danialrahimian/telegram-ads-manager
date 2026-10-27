@@ -131,6 +131,7 @@ class EditProbeIn(StrictModel):
     ad_id: int
     text: str = Field(min_length=1, max_length=400)
     confirm: bool = False
+    allow_pause: bool = False
 
 
 class BulkIn(StrictModel):

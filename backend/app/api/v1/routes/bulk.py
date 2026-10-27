@@ -54,7 +54,7 @@ async def get_capabilities(acc: AccountDep, s: Session) -> dict:
 async def edit_probe(body: EditProbeIn, acc: AccountDep, s: Session) -> dict:
     if not body.confirm:
         raise AppError("این آزمایش متن آگهی را واقعاً عوض می‌کند؛ تأیید لازم است.")
-    out = await bulk.probe_edit(s, acc, body.ad_id, body.text)
+    out = await bulk.probe_edit(s, acc, body.ad_id, body.text, allow_pause=body.allow_pause)
     await s.commit()
     return out
 
