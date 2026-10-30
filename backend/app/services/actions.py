@@ -13,7 +13,7 @@ from app.core.errors import AppError, NotFound
 from app.core.logging import get_logger
 from app.db.base import now_ts
 from app.db.session import session_scope
-from app.integrations.telegram_ads import TelegramAdsClient, TelegramAdsError, floor_amount
+from app.integrations.telegram_ads import TelegramAdsClient, TelegramAdsError
 from app.models import Account, Ad, BulkItem, Job, Proposal
 from app.services import budget, events
 from app.services.accounts import settings_of
@@ -489,7 +489,7 @@ async def run_job(job: Job, c: TelegramAdsClient) -> None:
             return await _requeue(
                 job.id, "آگهی هنوز فعال بود؛ متوقف شد و برداشت بعداً انجام می‌شود", get_settings().withdraw_delay_seconds
             )
-        amount = floor_amount(float(ad.get("remaining_budget") or 0))
+        amount = c.amount(float(ad.get("remaining_budget") or 0))
         if amount <= 0:
             return await _finish(job.id, "done", "بودجه‌ای برای برداشت نبود", {"done_amount": 0})
         await c.withdraw(aid, amount, key=job.idem_key)
@@ -554,6 +554,15 @@ async def _run_create(job: Job, c: TelegramAdsClient) -> None:
     from app.services import bulk
 
     params = dict(job.params or {})
+    if not params.pop("_copied", False) and job.ad_id:
+        # The old ad's photo/video and settings, read once and saved on the job before createAd: a retry then
+        # sends the very same parameters under its idempotency key (anything else is IDEMPOTENT_PARAM_MISMATCH).
+        old = (await c.ads_by_id([job.ad_id])).get(job.ad_id) or {}
+        params.update(bulk.copy_from_old(old, params, now_ts()))
+        async with session_scope() as s:
+            row = await s.get(Job, job.id)
+            if row is not None:
+                row.params = {**params, "_copied": True}
     acct = await c.account()
     if float(acct.get("remaining_budget") or 0) + 1e-9 < float(params.get("initial_budget") or 0):
         # Not this ad's fault: it goes back to the queue and is sent with the next wave.
@@ -681,6 +690,7 @@ async def process_due() -> int:
             job.status = "running"
             claimed.append(job)
         tokens = {a.id: crypto.decrypt(a.tg_token_enc) for a in accounts.values() if a.tg_token_enc}
+        currencies = {a.id: a.currency or "" for a in accounts.values()}
         await s.flush()
         for j in claimed:
             s.expunge(j)
@@ -693,7 +703,7 @@ async def process_due() -> int:
             await _finish(job.id, "failed", "توکن Telegram Ads وارد نشده است")
             continue
         try:
-            async with TelegramAdsClient(token) as c:
+            async with TelegramAdsClient(token, currency=currencies.get(job.account_id, "")) as c:
                 await run_job(job, c)
         except TelegramAdsError as e:
             if job.bulk_item_id and job.kind in ("create_ad", "edit_ad", "delete_ad") and e.error in FINAL_ERRORS:

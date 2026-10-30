@@ -285,6 +285,9 @@ class TgAdsApi:
 
         files = files or {}
         params = dict(params)
+        # The token may come as "Authorization: Bearer" or as the access_token parameter (docs: Authorization).
+        param_token = params.pop("access_token", None)
+        token = token or str(param_token or "")
         key = TOKENS.get(token)
         if key is None:
             return {"ok": False, "error": "ACCESS_TOKEN_INVALID" if token else "ACCESS_TOKEN_REQUIRED"}, {}
@@ -635,6 +638,13 @@ class TgAdsApi:
     def m_uploadWebsitePhoto(self, st: dict, p: dict, files: dict) -> dict:
         return self._upload(st, p, files, "website_photo", 2**20, (b"\xff\xd8", b"\x89PNG"))
 
+    @staticmethod
+    def _money(acc: dict, v: float, kind: str) -> float:
+        """Telegram rounds (not floors) money to the account currency's precision (docs: Currencies)."""
+        cur = acc["account"].get("currency", "TON")
+        places = {"XTR": 0 if kind == "budget" else 3}.get(cur, 2 if kind == "budget" else 5)
+        return round(v, places)
+
     # -------------------------------------------------------------- targets
     def _resolve(self, st: dict, kind: str, ident: Any) -> dict:
         """@username, or a numeric id this account resolved before (Sept 2026 rule)."""
@@ -642,8 +652,8 @@ class TgAdsApi:
         s = str(ident).strip()
         bad = "CHANNEL_INVALID" if kind == "channels" else "BOT_INVALID"
         if s.lstrip("-").isdigit():
-            if int(s) not in resolved:
-                raise ApiError(bad)
+            if int(s) not in resolved:  # docs: "Resolving channels and bots"
+                raise ApiError("CHANNEL_ID_UNKNOWN" if kind == "channels" else "BOT_ID_UNKNOWN")
             username = resolved[int(s)]
         else:
             username = s.lstrip("@")
@@ -742,14 +752,23 @@ class TgAdsApi:
                 raise ApiError("DEVICE_INVALID")
             if raw.get("exclude_political_channels") and raw.get("political_channels_only"):
                 raise ApiError("TARGET_INVALID")
+            topics = {x["topic_id"]: x for x in TOPICS}
+            if any(int(i) not in topics for i in lst("topic_ids") + lst("exclude_topic_ids")):
+                raise ApiError("TOPIC_ID_INVALID")
+            flags = ("intersect_topics", "exclude_political_channels", "political_channels_only")
             return {
                 "type": "users",
                 "countries": [x for x in COUNTRIES if x["country_code"] in ccs],
                 "locations": [x for x in LOCATIONS if x["location_id"] in {int(i) for i in locs}],
-                "audience_ids": [int(a) for a in aud],
-                "exclude_audience_ids": [int(a) for a in ex_aud],
+                "languages": [x for x in LANGUAGES if x["language_code"] in lst("language_codes")],
+                "topics": [topics[int(i)] for i in lst("topic_ids")],
+                "exclude_topics": [topics[int(i)] for i in lst("exclude_topic_ids")],
                 "channels": [self._resolve(st, "channels", c) for c in lst("channel_ids")],
+                "exclude_channels": [self._resolve(st, "channels", c) for c in lst("exclude_channel_ids")],
+                "audiences": [{k: v for k, v in known[int(a)].items() if k != "phones"} for a in aud],
+                "exclude_audiences": [{k: v for k, v in known[int(a)].items() if k != "phones"} for a in ex_aud],
                 **({"device": raw["device"]} if raw.get("device") else {}),
+                **{f: True for f in flags if raw.get(f)},
             }, {"type": t}
         if t == "bots":
             bots = lst("bot_ids")
@@ -873,13 +892,15 @@ class TgAdsApi:
         if placement not in PLACEMENTS or (placement != "video_banner" and placement != PLACEMENT_OF[ttype]):
             raise ApiError("PLACEMENT_INVALID")
         freq = _int(p, "impression_frequency", "IMPRESSION_FREQUENCY", lo=1, hi=4)
-        budget = _float(p, "initial_budget", "INITIAL_BUDGET", lo=0) or 0.0
+        budget = self._money(acc, _float(p, "initial_budget", "INITIAL_BUDGET", lo=0) or 0.0, "budget")
         if 0 < budget < MIN_INITIAL_BUDGET:
             raise ApiError("BUDGET_TOO_LOW")
         daily = _float(p, "daily_budget_limit", "DAILY_BUDGET_LIMIT", lo=0)
+        if daily:
+            daily = self._money(acc, daily, "budget")
         a: dict[str, Any] = {
             "title": title,
-            "currency": "TON",
+            "currency": acc["account"].get("currency", "TON"),
             "text": text or "",
             "promote_url": url,
             "cpm": cpm,
@@ -986,6 +1007,7 @@ class TgAdsApi:
         acc = self._acct(st, p)
         a = self._ad(acc, p)
         amt = _float(p, "amount", "AMOUNT", req=True)
+        amt = None if amt is None else self._money(acc, amt, "amount")
         if amt is None or amt <= 0:
             raise ApiError("AMOUNT_INVALID")
         if amt > acc["account"]["remaining_budget"] + 1e-9:
@@ -1000,6 +1022,7 @@ class TgAdsApi:
         acc = self._acct(st, p)
         a = self._ad(acc, p)
         amt = _float(p, "amount", "AMOUNT", req=True)
+        amt = None if amt is None else self._money(acc, amt, "amount")
         if amt is None or amt <= 0:
             raise ApiError("AMOUNT_INVALID")
         if self._inactive_for(acc, a) < self.inactive_seconds or (a["status"] == "active" and not a.get("is_paused")):
@@ -1078,8 +1101,11 @@ class TgAdsApi:
             1
             for a in st["ads"].values()
             if aud["audience_id"]
-            in ((a.get("target") or {}).get("audience_ids") or [])
-            + ((a.get("target") or {}).get("exclude_audience_ids") or [])
+            in {
+                x["audience_id"]
+                for k in ("audiences", "exclude_audiences")
+                for x in (a.get("target") or {}).get(k) or []
+            }
         )
         return {
             "audience_id": aud["audience_id"],

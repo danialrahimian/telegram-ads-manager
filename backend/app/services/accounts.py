@@ -200,7 +200,7 @@ def tg_client(acc: Account) -> TelegramAdsClient:
     token = crypto.decrypt(acc.tg_token_enc)
     if not token:
         raise AppError("توکن Telegram Ads برای این حساب وارد نشده است.", code="tg_not_configured")
-    return TelegramAdsClient(token)
+    return TelegramAdsClient(token, currency=acc.currency or "")
 
 
 def apply_account_info(acc: Account, info: dict[str, Any]) -> None:

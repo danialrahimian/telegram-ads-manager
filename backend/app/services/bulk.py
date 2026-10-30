@@ -306,24 +306,127 @@ async def probe(s: AsyncSession, acc: Account) -> dict[str, Any]:
 # ---------------------------------------------------------------- planning (preview)
 
 
+def _peer_ids(items: Any, id_key: str) -> list[int | str]:
+    """TargetChannel/TargetBot objects as createAd ids: @username when there is one (always resolvable), else
+    the numeric id, which works because this same account already targets it (docs: "Resolving channels")."""
+    out: list[int | str] = []
+    for x in items or []:
+        if not isinstance(x, dict):
+            continue
+        if x.get("username"):
+            out.append("@" + str(x["username"]).lstrip("@"))
+        elif x.get(id_key):
+            out.append(int(x[id_key]))
+    return out
+
+
+def _codes(items: Any, key: str) -> list[Any]:
+    return [x[key] for x in items or [] if isinstance(x, dict) and x.get(key) not in (None, "")]
+
+
+DEFAULT_PLACEMENT = {
+    "channels": "channel_post",
+    "users": "channel_post",
+    "bots": "bot_banner",
+    "search": "search_result",
+}
+
+
 def create_target(ad: Ad) -> tuple[dict[str, Any], str] | None:
-    """createAd target and placement for a replacement of `ad`, or None for targets we cannot copy safely."""
+    """createAd target (InputAdTarget) and placement copying the AdTarget of `ad`, or None when the stored
+    target holds nothing we can copy (a replacement must reach the same audience, never a wider one)."""
     t = ad.target or {}
     typ = t.get("type") or ad.target_type
+    slot = ad.placement or DEFAULT_PLACEMENT.get(typ, "")
+    out: dict[str, Any] = {"type": typ}
     if typ == "channels":
-        ids = [
-            ("@" + str(x["username"])) if x.get("username") else str(x.get("channel_id") or "")
-            for x in t.get("channels") or []
-        ]
-        ids = [i for i in ids if i and i != "@"]
-        return ({"type": "channels", "channel_ids": ids}, ad.placement or "channel_post") if ids else None
-    if typ == "bots":
-        ids = [
-            ("@" + str(x["username"])) if x.get("username") else str(x.get("bot_id") or "") for x in t.get("bots") or []
-        ]
-        ids = [i for i in ids if i and i != "@"]
-        return ({"type": "bots", "bot_ids": ids}, ad.placement or "bot_banner") if ids else None
-    return None
+        out["language_codes"] = _codes(t.get("languages"), "language_code")
+        out["topic_ids"] = _codes(t.get("topics"), "topic_id")
+        out["exclude_topic_ids"] = _codes(t.get("exclude_topics"), "topic_id")
+        out["channel_ids"] = _peer_ids(t.get("channels"), "channel_id")
+        out["exclude_channel_ids"] = _peer_ids(t.get("exclude_channels"), "channel_id")
+        if len(out["channel_ids"]) != len(t.get("channels") or []):
+            return None  # a channel we cannot name would silently drop out of the target
+        if not (out["language_codes"] or out["topic_ids"] or out["channel_ids"]):
+            return None
+    elif typ == "users":
+        out["country_codes"] = _codes(t.get("countries"), "country_code")
+        out["location_ids"] = _codes(t.get("locations"), "location_id")
+        out["language_codes"] = _codes(t.get("languages"), "language_code")
+        out["topic_ids"] = _codes(t.get("topics"), "topic_id")
+        out["exclude_topic_ids"] = _codes(t.get("exclude_topics"), "topic_id")
+        out["channel_ids"] = _peer_ids(t.get("channels"), "channel_id")
+        out["exclude_channel_ids"] = _peer_ids(t.get("exclude_channels"), "channel_id")
+        out["audience_ids"] = _codes(t.get("audiences"), "audience_id")
+        out["exclude_audience_ids"] = _codes(t.get("exclude_audiences"), "audience_id")
+        if len(out["channel_ids"]) != len(t.get("channels") or []):
+            return None
+        for flag in ("intersect_topics", "exclude_political_channels", "political_channels_only"):
+            if t.get(flag):
+                out[flag] = True
+        if t.get("device"):
+            out["device"] = t["device"]
+        if not any(out[k] for k in ("country_codes", "language_codes", "topic_ids", "channel_ids", "audience_ids")):
+            return None
+    elif typ == "bots":
+        out["bot_ids"] = _peer_ids(t.get("bots"), "bot_id")
+        if not out["bot_ids"] or len(out["bot_ids"]) != len(t.get("bots") or []):
+            return None
+    elif typ == "search":
+        out["search_queries"] = [q for q in t.get("search_queries") or [] if q]
+        if not out["search_queries"]:
+            return None
+    else:
+        return None
+    # Empty optional lists are left out: the same meaning, a smaller request (country_codes is required).
+    return {k: v for k, v in out.items() if v not in ([], None) or k == "country_codes"}, slot
+
+
+# Settings a replacement copies unchanged from the old ad as Telegram returns it (getAdsById), under the same
+# createAd parameter names. Read when the create job runs, since our table does not keep them.
+_COPIED = ("impression_frequency", "show_userpic", "additional_info")
+# Only for an external link, as documented (createAd refuses them for a t.me link).
+_COPIED_EXTERNAL = ("website_name", "button", "conversion_event_id")
+VIDEO_PLACEMENTS = {"channel_post", "channels", "video_banner"}
+
+
+def _external(url: str) -> bool:
+    return not re.match(r"^(https?://)?(t\.me|telegram\.me)/", url or "")
+
+
+def copy_from_old(old: dict[str, Any], params: dict[str, Any], now: int) -> dict[str, Any]:
+    """createAd parameters that keep the old ad's photo/video and settings on its replacement.
+
+    A new photo (params["photo_id"]) wins over the old photo or video: createAd takes only one of the two.
+    photo_id/video_id are unique per account and the replacement lives in the same account, so they carry
+    over. Dates are copied only while still ahead (createAd refuses past ones).
+    """
+    out: dict[str, Any] = {}
+    slot = str(params.get("placement") or "")
+    if not params.get("photo_id"):
+        photo, video = old.get("photo"), old.get("video")
+        if isinstance(photo, dict) and photo.get("photo_id") and placement.supports_photo(placement=slot):
+            out["photo_id"] = str(photo["photo_id"])
+        elif isinstance(video, dict) and video.get("video_id") and slot in VIDEO_PLACEMENTS:
+            out["video_id"] = str(video["video_id"])
+    external = _external(str(params.get("promote_url") or ""))
+    for k in _COPIED + (_COPIED_EXTERNAL if external else ()):
+        if old.get(k) not in (None, "", False):
+            out[k] = old[k]
+    site = old.get("website_photo")
+    if external and isinstance(site, dict) and site.get("photo_id"):
+        out["website_photo_id"] = str(site["photo_id"])
+    if float(old.get("daily_budget_limit") or 0) > 0:
+        out["daily_budget_limit"] = float(old["daily_budget_limit"])
+    sched = old.get("schedule")
+    if isinstance(sched, dict) and any(int(m or 0) for m in sched.get("week_hours_mask") or []):
+        out["schedule"] = {
+            k: sched[k] for k in ("week_hours_mask", "timezone", "use_viewer_timezone") if sched.get(k) is not None
+        }
+    for k in ("activate_date", "deactivate_date"):
+        if int(old.get(k) or 0) > now + 60:
+            out[k] = int(old[k])
+    return out
 
 
 def transfer_amount(old: float, source: str, move_old: bool, min_budget: float, cap: float) -> float:
@@ -581,11 +684,12 @@ async def plan(s: AsyncSession, acc: Account, body: dict[str, Any], *, live_bala
         tgt = create_target(ad)
         if tgt is None:
             it["blocked"] = (
-                "هدف‌گیری این آگهی (غیر از کانال/ربات مشخص) برای ساخت خودکار جایگزین پشتیبانی نمی‌شود؛ «ویرایش در جا» را انتخاب کنید."
+                "هدف‌گیری این آگهی از تلگرام خوانده نشده یا کامل نیست؛ جایگزین ساخته نمی‌شود تا مخاطب عوض نشود. "
+                "یک بار همگام‌سازی کنید یا «ویرایش در جا» را انتخاب کنید."
             )
             continue
-        if ad.has_photo and not photo_id:
-            it["warnings"].append("آگهی قدیمی عکس دارد؛ جایگزین بدون عکس ساخته می‌شود مگر عکس تازه بدهید.")
+        if (ad.has_photo or ad.has_video) and not photo_id:
+            it["warnings"].append("عکس/ویدیوی آگهی قدیمی هنگام ساخت از تلگرام خوانده و روی آگهی جدید گذاشته می‌شود.")
         old_budget = ad.remaining_budget or 0
         start = min_budget if budget_source == "transfer" else initial
         moved = transfer_amount(old_budget, budget_source, move_old, min_budget, st["topup_max_per_ad"])
@@ -975,7 +1079,6 @@ def _create_params(op: BulkOperation, it: BulkItem, ad: Ad) -> dict[str, Any] | 
     title = clip_bytes(re.sub(r"\s+", " ", f"{ad.title or ad.target_label or ad.ad_id}"), 128 - len(suffix)) + suffix
     params: dict[str, Any] = {
         "title": title,
-        "text": it.params.get("text") or ad.text,
         "promote_url": it.params.get("promote_url") or ad.promote_url,
         "cpm": ad.cpm,
         "placement": slot,
@@ -983,6 +1086,9 @@ def _create_params(op: BulkOperation, it: BulkItem, ad: Ad) -> dict[str, Any] | 
         "initial_budget": float(it.params.get("initial_budget") or 0),
         "return_target": True,
     }
+    text = it.params.get("text") or ad.text
+    if text:  # optional only for search ads, and 1-160 characters when sent
+        params["text"] = text
     if it.params.get("photo_id") and placement.supports_photo(ad):
         params["photo_id"] = it.params["photo_id"]
     return params
@@ -1223,6 +1329,7 @@ async def store_created_ad(
     ad.target_type, ad.target_label = typ or str(params["target"]["type"]), label
     ad.target = raw.get("target") or {}
     ad.has_photo = bool(raw.get("photo")) or "photo_id" in params
+    ad.has_video = bool(raw.get("video")) or "video_id" in params
     ad.variant_id = item.params.get("variant_id")
     ad.created_by_app = True
     ad.synced_ts = now
