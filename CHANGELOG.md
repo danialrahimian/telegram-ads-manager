@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.2.4 — the source checked against the Telegram Ads API documentation
+
+- **Replacement ads reach the same audience.** A replacement used to copy only the listed channels or bots. Ads targeting channels by language or topic, excluded channels or topics, user demographics or search queries were refused, and a channel list lost its exclusions. Telegram's whole target is now copied into the new ad: languages, topics (included, excluded, "all topics"), channels (included, excluded; @username, or the numeric id this account already uses), countries, locations, audiences (included, excluded), device, the political-channel options and search queries. A replacement is still refused when part of the target cannot be named, so the audience never changes.
+- **Replacement ads keep the old photo or video and settings.** Before, a replacement without a new photo was created with no picture. When the replacement is created, the old ad is read from Telegram, and its photo or video carries over (a new photo still wins), along with impressions per user, daily budget limit, hour schedule, channel picture, website name, website photo, button, extra info, conversion pixel and a future start or stop date. These are saved on the job before `createAd`, so a retry sends exactly the same request under its idempotency key.
+- **Money follows the account currency's precision.** Telegram rounds amounts: 5 decimals for TON/EUR and 3 for Stars, and budgets to 2 decimals or whole Stars. Withdrawals, top-ups and budget transfers are now rounded down to the account's precision, and so are the initial budget and daily limit of new ads. A Stars account can no longer have 1.6 rounded up to 2 and refused for lack of balance.
+- `CHANNEL_ID_UNKNOWN` / `BOT_ID_UNKNOWN`, for a numeric id this account never resolved, now show a clear message asking for the @username.
+- The fake API used by the tests now follows the same rules: it rounds money like Telegram, returns user targets in the documented shape, accepts the token as the `access_token` parameter and returns `CHANNEL_ID_UNKNOWN`/`BOT_ID_UNKNOWN`. New tests in `tests/test_v224.py` include a round trip of every target type through createAd.
+
 ## v2.2.3 — why Telegram ignores an edit, and editing paused ads
 
 - On the real account the edit test showed that none of the three request formats changes the text, while ads.telegram.org accepts the same edit. The test now goes further when no format works:

@@ -46,6 +46,8 @@ ERROR_HINTS = {
     "AD_ACTIVE_RECENTLY": "آگهی کمتر از ۱۰ دقیقه پیش فعال بوده؛ بعداً دوباره امتحان می‌شود.",
     "CHANNEL_INVALID": "این کانال پیدا نشد یا برای تبلیغ مجاز نیست.",
     "BOT_INVALID": "این ربات پیدا نشد یا برای تبلیغ مجاز نیست.",
+    "CHANNEL_ID_UNKNOWN": "این حساب شناسه‌ی عددی این کانال را نمی‌شناسد؛ کانال را با @username بدهید.",
+    "BOT_ID_UNKNOWN": "این حساب شناسه‌ی عددی این ربات را نمی‌شناسد؛ ربات را با @username بدهید.",
     "AD_TEXT_TOO_LONG": "متن آگهی بیشتر از ۱۶۰ کاراکتر است.",
 }
 
@@ -88,16 +90,38 @@ def clip_bytes(text: str, limit: int = 128) -> str:
     return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
 
-def floor_amount(x: float, places: str = "0.00001") -> float:
-    """Round down to the API's amount precision so we never ask for more than exists."""
-    return float(Decimal(str(x)).quantize(Decimal(places), rounding=ROUND_DOWN))
+# Decimal places Telegram keeps for each account currency (docs: "Currencies"). Telegram rounds whatever it is
+# sent to these, so we round down first: a rounded-up amount or budget could ask for more than exists.
+AMOUNT_PLACES = {"EUR": 5, "TON": 5, "XTR": 3}  # transaction amounts (increase/decrease…Budget)
+BUDGET_PLACES = {"EUR": 2, "TON": 2, "XTR": 0}  # cpm, initial_budget, daily_budget_limit
+
+
+def floor_amount(x: float, places: int = 5) -> float:
+    """Round down to `places` decimals so we never ask for more than exists."""
+    return float(Decimal(str(x)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN))
+
+
+def amount_places(currency: str) -> int:
+    return AMOUNT_PLACES.get((currency or "").upper(), 5)
+
+
+def budget_places(currency: str) -> int:
+    return BUDGET_PLACES.get((currency or "").upper(), 2)
 
 
 class TelegramAdsClient:
     def __init__(
-        self, token: str, *, base: str | None = None, http: httpx.AsyncClient | None = None, edit_format: str = "json"
+        self,
+        token: str,
+        *,
+        base: str | None = None,
+        http: httpx.AsyncClient | None = None,
+        edit_format: str = "json",
+        currency: str = "",
     ) -> None:
         self.token = token
+        # The account's currency decides how amounts are rounded (see AMOUNT_PLACES); unknown means TON/EUR.
+        self.currency = currency
         # How editAd content changes are sent (see services/bulk.py: probe_edit finds the one Telegram applies).
         self.edit_format = edit_format if edit_format in FORMATS else "json"
         self.base = (base or get_settings().telegram_ads_api_base).rstrip("/")
@@ -217,18 +241,29 @@ class TelegramAdsClient:
 
     async def withdraw(self, ad_id: int, amount: float, key: str | None = None) -> dict[str, Any]:
         return await self.call(
-            "decreaseAdBudget", idempotency_key=key or str(uuid.uuid4()), ad_id=ad_id, amount=floor_amount(amount)
+            "decreaseAdBudget", idempotency_key=key or str(uuid.uuid4()), ad_id=ad_id, amount=self.amount(amount)
         )
 
     async def topup(self, ad_id: int, amount: float, key: str | None = None) -> dict[str, Any]:
         return await self.call(
-            "increaseAdBudget", idempotency_key=key or str(uuid.uuid4()), ad_id=ad_id, amount=floor_amount(amount)
+            "increaseAdBudget", idempotency_key=key or str(uuid.uuid4()), ad_id=ad_id, amount=self.amount(amount)
         )
 
     async def upload_photo(self, filename: str, content: bytes, content_type: str) -> dict[str, Any]:
         return await self.call("uploadAdPhoto", files={"file": (filename, content, content_type)})
 
+    def amount(self, x: float) -> float:
+        """A transaction amount rounded down to this account's amount precision."""
+        return floor_amount(x, amount_places(self.currency))
+
+    def budget(self, x: float) -> float:
+        """An initial budget or daily limit rounded down to this account's cpm & budget precision."""
+        return floor_amount(x, budget_places(self.currency))
+
     async def create_ad(self, key: str, **params: Any) -> dict[str, Any]:
+        for k in ("initial_budget", "daily_budget_limit"):
+            if params.get(k) is not None:
+                params[k] = self.budget(float(params[k]))
         return await self.call("createAd", idempotency_key=key, **params)
 
     async def delete_ad(self, ad_id: int) -> Any:
@@ -305,12 +340,12 @@ class TelegramAdsApi(TelegramAdsClient):
 
     async def increase_account_budget(self, account_id: str, amount: float, key: str) -> dict[str, Any]:
         return await self.call(
-            "increaseAccountBudget", idempotency_key=key, account_id=account_id, amount=floor_amount(amount)
+            "increaseAccountBudget", idempotency_key=key, account_id=account_id, amount=self.amount(amount)
         )
 
     async def decrease_account_budget(self, account_id: str, amount: float, key: str) -> dict[str, Any]:
         return await self.call(
-            "decreaseAccountBudget", idempotency_key=key, account_id=account_id, amount=floor_amount(amount)
+            "decreaseAccountBudget", idempotency_key=key, account_id=account_id, amount=self.amount(amount)
         )
 
     async def transaction_status(self, transaction_id: str) -> dict[str, Any]:

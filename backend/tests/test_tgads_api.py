@@ -458,11 +458,30 @@ async def test_numeric_channel_ids_need_a_resolution_first(tg):
                 target={"type": "channels", "channel_ids": [num]},
             )
         )
-        == "CHANNEL_INVALID"
+        == "CHANNEL_ID_UNKNOWN"
     )
     ad = await new_ad(tg, target={"type": "channels", "channel_ids": [num]})
     assert ad["target"]["channels"][0]["username"] == "daily_tech"
-    assert await err(new_ad(tg, target={"type": "channels", "channel_ids": [123456789]})) == "CHANNEL_INVALID"
+    assert await err(new_ad(tg, target={"type": "channels", "channel_ids": [123456789]})) == "CHANNEL_ID_UNKNOWN"
+    assert await err(tg.target_channel("123456789")) == "CHANNEL_ID_UNKNOWN"
+    assert await err(tg.target_bot("987654321")) == "BOT_ID_UNKNOWN"
+    assert await err(new_ad(tg, target={"type": "bots", "bot_ids": [987654321]}, placement="bot_banner")) == (
+        "BOT_ID_UNKNOWN"
+    )
+    # A malformed username is still invalid, not unknown.
+    assert await err(tg.target_channel("@a")) == "CHANNEL_INVALID"
+    e = TelegramAdsError("createAd", "CHANNEL_ID_UNKNOWN")
+    assert "@username" in e.friendly
+
+
+def test_access_token_may_be_a_parameter(tg):
+    """docs (Authorization): the token goes in the header or as the access_token parameter."""
+    r = raw("getAccountInfo", token="", data={"access_token": "mocktoken-a"})
+    assert r.json()["ok"] is True
+    r = raw("getAccountInfo", token="", get=True, params={"access_token": "mocktoken-a"})
+    assert r.json()["ok"] is True
+    assert raw("getAccountInfo", token="", data={"access_token": "nope"}).json()["error"] == "ACCESS_TOKEN_INVALID"
+    assert raw("getAccountInfo", token="").json()["error"] == "ACCESS_TOKEN_REQUIRED"
 
 
 async def test_user_targets(tg):
@@ -726,7 +745,7 @@ async def test_target_channel_and_bot(tg):
         "username"
     ] == "tech_news"
     assert await err(tg.target_channel("@badchannel")) == "CHANNEL_INVALID"
-    assert await err(tg.target_channel(str(10**9))) == "CHANNEL_INVALID"  # never resolved by this account
+    assert await err(tg.target_channel(str(10**9))) == "CHANNEL_ID_UNKNOWN"  # never resolved by this account
     bot = await tg.target_bot("@helper_bot")
     assert bot["bot_id"] and bot["username"] == "helper_bot"
     assert (await tg.target_bot(str(bot["bot_id"])))["username"] == "helper_bot"

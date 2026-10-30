@@ -7,7 +7,7 @@ PHOTO_PLACEMENTS = {"channel_post", "channels"}
 
 
 def supports_photo(ad: Any = None, *, placement: str = "", target_type: str = "") -> bool:
-    """Only channel ads carry a photo; bot banners (and search results) do not.
+    """Only channel-post ads (targeting channels or users) carry a photo; bot banners and search results do not.
 
     Accepts an Ad (anything with `placement` and `target_type`) or the two values directly.
     """
@@ -16,7 +16,7 @@ def supports_photo(ad: Any = None, *, placement: str = "", target_type: str = ""
         target_type = getattr(ad, "target_type", "") or ""
     if placement:
         return placement in PHOTO_PLACEMENTS
-    return target_type == "channels"
+    return target_type in ("channels", "users")
 
 
 def kind_supports_photo(kind: str) -> bool:
